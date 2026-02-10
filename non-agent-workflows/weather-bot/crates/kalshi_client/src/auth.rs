@@ -8,7 +8,7 @@ use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::pkcs8::DecodePrivateKey;
 use rsa::pss::{BlindedSigningKey, Signature};
 use rsa::sha2::Sha256;
-use rsa::signature::RandomizedSigner;
+use rsa::signature::{RandomizedSigner, SignatureEncoding};
 use rsa::RsaPrivateKey;
 
 use common::Error;
@@ -74,7 +74,7 @@ impl KalshiAuth {
         let mut rng = rand::thread_rng();
         let signature: Signature = self.signing_key.sign_with_rng(&mut rng, message.as_bytes());
 
-        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
 
         (timestamp, sig_b64)
     }

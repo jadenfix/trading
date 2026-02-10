@@ -28,6 +28,10 @@ pub struct ArbConfig {
 
     #[serde(default = "default_qty")]
     pub default_qty: i64,
+
+    /// Only include markets resolving in fewer than this many days.
+    #[serde(default = "default_max_days_to_resolution")]
+    pub max_days_to_resolution: i64,
 }
 
 /// Timing configuration.
@@ -104,6 +108,9 @@ fn default_min_leg_size() -> i64 {
 fn default_qty() -> i64 {
     10
 }
+fn default_max_days_to_resolution() -> i64 {
+    11
+}
 fn default_universe_refresh() -> u64 {
     900
 }
@@ -158,6 +165,7 @@ impl Default for ArbConfig {
             tie_buffer_cents: default_tie_buffer(),
             min_leg_size: default_min_leg_size(),
             default_qty: default_qty(),
+            max_days_to_resolution: default_max_days_to_resolution(),
         }
     }
 }

@@ -57,5 +57,5 @@ export ANTHROPIC_API_KEY="[ENCRYPTION_KEY]"
 
 The non-agent bots write runtime JSONL trade journals under:
 
-- `/Users/jadenfix/Desktop/trading/TRADES/arbitrage-bot`
-- `/Users/jadenfix/Desktop/trading/TRADES/weather-bot`
+- `../trading/TRADES/arbitrage-bot`
+- `../trading/TRADES/weather-bot`

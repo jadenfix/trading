@@ -6,6 +6,7 @@ ARB_DIR="$ROOT_DIR/non-agent-workflows/arbitrage-bot"
 WEATHER_DIR="$ROOT_DIR/non-agent-workflows/weather-bot"
 TRADES_DIR="${TRADES_DIR:-$ROOT_DIR/TRADES}"
 MODE="${1:-prod}"
+ARB_MAX_DAYS_TO_RESOLUTION=11
 LOCK_DIR="$ROOT_DIR/.run-bots.lock"
 LOCK_OWNED=0
 
@@ -23,6 +24,9 @@ Optional environment variables:
   USE_DEMO=0|1   Override environment target (default: 0)
   TRADES_DIR=... Root trades folder (default: <repo>/TRADES)
   ALLOW_MULTI=1  Allow launching even if bot process appears to already be running
+
+Behavior:
+  Arbitrage bot is forced to short-term discovery with ARB_MAX_DAYS_TO_RESOLUTION=11
 EOF
 }
 
@@ -44,6 +48,7 @@ fi
 mkdir -p "$TRADES_DIR"
 export TRADES_DIR
 export USE_DEMO="${USE_DEMO:-0}"
+export ARB_MAX_DAYS_TO_RESOLUTION
 
 if [[ "${ALLOW_MULTI:-0}" != "1" ]]; then
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
@@ -92,6 +97,7 @@ echo "Starting bots in parallel"
 echo "  MODE=$MODE"
 echo "  USE_DEMO=$USE_DEMO"
 echo "  TRADES_DIR=$TRADES_DIR"
+echo "  ARB_MAX_DAYS_TO_RESOLUTION=$ARB_MAX_DAYS_TO_RESOLUTION"
 
 cleanup() {
   local code=$?

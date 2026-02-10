@@ -170,6 +170,17 @@ pub fn load_config() -> Result<ArbBotConfig, Error> {
     if let Ok(demo) = std::env::var("USE_DEMO") {
         config.use_demo = demo != "0" && demo.to_lowercase() != "false";
     }
+    if let Ok(days) = std::env::var("ARB_MAX_DAYS_TO_RESOLUTION") {
+        let parsed = days.trim().parse::<i64>().map_err(|_| {
+            Error::Config("ARB_MAX_DAYS_TO_RESOLUTION must be an integer > 0".into())
+        })?;
+        if parsed <= 0 {
+            return Err(Error::Config(
+                "ARB_MAX_DAYS_TO_RESOLUTION must be an integer > 0".into(),
+            ));
+        }
+        config.arb.max_days_to_resolution = parsed;
+    }
 
     // 5. Validate required fields.
     if config.api_key.is_empty() {

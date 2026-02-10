@@ -331,6 +331,10 @@ pub struct CreateOrderRequest {
     pub no_price: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expiration_ts: Option<i64>,
+    /// Time-in-force policy: "fill_or_kill", "good_till_canceled", or
+    /// "immediate_or_cancel".  Omitted ⇒ API default (GTC).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_in_force: Option<String>,
 }
 
 /// Response from POST /trade-api/v2/portfolio/orders.
@@ -604,10 +608,12 @@ mod tests {
         let payload = json!({
             "orders": [
                 {
-                    "ticker": "KXTEST-26",
-                    "status": "rejected",
-                    "fill_count": 0,
-                    "remaining_count": 0
+                    "order": {
+                        "ticker": "KXTEST-26",
+                        "status": "rejected",
+                        "fill_count": 0,
+                        "remaining_count": 0
+                    }
                 }
             ]
         });
@@ -615,9 +621,32 @@ mod tests {
         let parsed: BatchOrderResponse =
             serde_json::from_value(payload).expect("should deserialize");
         assert_eq!(parsed.orders.len(), 1);
-        assert_eq!(parsed.orders[0].order_id, "");
-        assert_eq!(parsed.orders[0].ticker, "KXTEST-26");
-        assert_eq!(parsed.orders[0].status, "rejected");
+        let order = parsed.orders[0].order.as_ref().expect("should have order");
+        assert_eq!(order.order_id, "");
+        assert_eq!(order.ticker, "KXTEST-26");
+        assert_eq!(order.status, "rejected");
+    }
+
+    #[test]
+    fn test_batch_response_handles_errors() {
+        let payload = json!({
+            "orders": [
+                {
+                    "client_order_id": "abc-123",
+                    "error": {
+                        "code": "insufficient_balance",
+                        "message": "Not enough funds"
+                    }
+                }
+            ]
+        });
+
+        let parsed: BatchOrderResponse =
+            serde_json::from_value(payload).expect("should deserialize");
+        assert_eq!(parsed.orders.len(), 1);
+        assert!(parsed.orders[0].order.is_none());
+        let err = parsed.orders[0].error.as_ref().expect("should have error");
+        assert_eq!(err.code.as_deref(), Some("insufficient_balance"));
     }
 }
 
@@ -649,7 +678,32 @@ pub struct BatchOrderRequest {
     pub orders: Vec<CreateOrderRequest>,
 }
 
+/// Per-order error returned inside a batch response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchOrderError {
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Wrapper for each entry in a batch-create response.
+///
+/// The Kalshi API returns `{ client_order_id, order (nullable), error (nullable) }`
+/// for every order in the batch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchOrderEntry {
+    #[serde(default)]
+    pub client_order_id: Option<String>,
+    /// The resulting order — `None` when this entry failed.
+    #[serde(default)]
+    pub order: Option<OrderInfo>,
+    /// Per-order error — `None` when this entry succeeded.
+    #[serde(default)]
+    pub error: Option<BatchOrderError>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchOrderResponse {
-    pub orders: Vec<OrderInfo>,
+    pub orders: Vec<BatchOrderEntry>,
 }

@@ -320,6 +320,7 @@ impl KalshiRestClient {
             yes_price,
             no_price,
             expiration_ts: None,
+            time_in_force: None,
         };
 
         debug!(

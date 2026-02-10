@@ -1,0 +1,16 @@
+[package]
+name = "arb_strategy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common = { path = "../../../libs/common" }
+kalshi_client = { path = "../../../libs/kalshi_client" }
+
+dashmap = "6"
+tokio = { version = "1", features = ["sync", "time"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+uuid = { version = "1.20.0", features = ["v4"] }

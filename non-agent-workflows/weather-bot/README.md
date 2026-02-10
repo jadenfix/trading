@@ -21,24 +21,10 @@ cargo run
 
 ## Architecture
 
-```
-weather-bot/
-├── src/
-│   ├── main.rs           # Tokio task orchestration
-│   └── config.rs         # Config loader (env + toml)
-├── crates/
-│   ├── common/           # Shared types, config, errors
-│   ├── kalshi_client/    # REST + WebSocket + RSA-PSS auth
-│   ├── noaa_client/      # NOAA forecast fetcher + probability
-│   └── strategy/         # Strategy engine + risk manager
-└── config.toml           # Default configuration
-```
-
-**4 concurrent Tokio tasks:**
-1. **Market Discovery** — finds weather markets every 30 min
-2. **Price Feed** — WebSocket ticker stream → PriceCache
-3. **Forecast Ingest** — NOAA hourly forecasts → ForecastCache
-4. **Strategy Loop** — evaluates every 2 min → risk check → execute
+- **`crates/strategy`**: Core decision logic comparing NOAA forecasts to Kalshi market probabilities.
+- **`crates/noaa_client`**: Client for fetching and parsing NWS grid forecasts.
+- **`libs/kalshi_client`**: Shared Kalshi API client (REST + WebSocket).
+- **`libs/common`**: Shared types and utilities.
 
 ## Configuration
 

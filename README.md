@@ -35,3 +35,20 @@ pnpm install
 ## Workflows
 
 Navigate to the respective directories to run specific workflows or check their `package.json` for available scripts.
+
+## Kalshi API Set UP 
+
+```bash
+export KALSHI_API_KEY="[ENCRYPTION_KEY]"
+export KALSHI_SECRET_KEY="[ENCRYPTION_KEY]"
+```
+
+## LLM Key Set Up
+
+```bash
+export OPENAI_API_KEY="[ENCRYPTION_KEY]"
+```
+or 
+```bash
+export ANTHROPIC_API_KEY="[ENCRYPTION_KEY]"
+```

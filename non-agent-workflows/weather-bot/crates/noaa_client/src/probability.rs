@@ -50,8 +50,15 @@ pub fn compute_probability(
     let std_dev_high = std_dev * 1.5; // pessimistic uncertainty
     let std_dev_low = (std_dev * 0.7).max(1.5); // optimistic uncertainty
 
-    let p_variant_a = compute_p_yes_inner(forecast, strike_type, floor_strike, cap_strike, std_dev_high);
-    let p_variant_b = compute_p_yes_inner(forecast, strike_type, floor_strike, cap_strike, std_dev_low);
+    let p_variant_a = compute_p_yes_inner(
+        forecast,
+        strike_type,
+        floor_strike,
+        cap_strike,
+        std_dev_high,
+    );
+    let p_variant_b =
+        compute_p_yes_inner(forecast, strike_type, floor_strike, cap_strike, std_dev_low);
 
     let p_yes_low = p_variant_a.min(p_variant_b);
     let p_yes_high = p_variant_a.max(p_variant_b);
@@ -226,11 +233,7 @@ mod tests {
     #[test]
     fn test_rational_cdf_at_zero() {
         let cdf = normal_cdf(0.0);
-        assert!(
-            (cdf - 0.5).abs() < 1e-7,
-            "CDF(0) = {} should be 0.5",
-            cdf
-        );
+        assert!((cdf - 0.5).abs() < 1e-7, "CDF(0) = {} should be 0.5", cdf);
     }
 
     #[test]
@@ -240,7 +243,9 @@ mod tests {
             assert!(
                 (sum - 1.0).abs() < 1e-7,
                 "CDF({}) + CDF(-{}) = {} should be 1.0",
-                z, z, sum
+                z,
+                z,
+                sum
             );
         }
     }
@@ -260,7 +265,9 @@ mod tests {
             assert!(
                 (got - expected).abs() < 1e-5,
                 "CDF({}) = {}, expected ~{}",
-                z, got, expected
+                z,
+                got,
+                expected
             );
         }
     }
@@ -320,7 +327,8 @@ mod tests {
         assert!(
             p_wet < p_dry,
             "Wet p={} should be lower than dry p={} for high-temp markets",
-            p_wet, p_dry
+            p_wet,
+            p_dry
         );
     }
 
@@ -337,7 +345,8 @@ mod tests {
         assert!(
             p_wet < p_dry,
             "Wet p={} should be lower than dry p={} for very-low-strike",
-            p_wet, p_dry
+            p_wet,
+            p_dry
         );
     }
 
@@ -351,12 +360,14 @@ mod tests {
         assert!(
             est.p_yes_low <= est.p_yes,
             "p_yes_low={} should be <= p_yes={}",
-            est.p_yes_low, est.p_yes
+            est.p_yes_low,
+            est.p_yes
         );
         assert!(
             est.p_yes <= est.p_yes_high,
             "p_yes={} should be <= p_yes_high={}",
-            est.p_yes, est.p_yes_high
+            est.p_yes,
+            est.p_yes_high
         );
     }
 

@@ -67,8 +67,7 @@ impl StrategyEngine {
 
             // 2. Check not too close to expiry.
             if let Some(close_time) = market.close_time {
-                let hours_left =
-                    (close_time - now).num_minutes() as f64 / 60.0;
+                let hours_left = (close_time - now).num_minutes() as f64 / 60.0;
                 if hours_left < strat.min_hours_before_close {
                     debug!("{}: too close to expiry ({:.1}h left)", ticker, hours_left);
                     continue;
@@ -84,7 +83,8 @@ impl StrategyEngine {
                 }
             };
 
-            if price.updated_at.elapsed() > Duration::from_secs(self.config.timing.price_stale_secs) {
+            if price.updated_at.elapsed() > Duration::from_secs(self.config.timing.price_stale_secs)
+            {
                 debug!("{}: price data stale", ticker);
                 continue;
             }
@@ -137,23 +137,35 @@ impl StrategyEngine {
             // 8. Compute fee-adjusted edge.
             //    fair_cents uses the conservative p_yes_low for entries.
             let fair_cents = (100.0 * estimate.p_yes).floor() as i64 - strat.safety_margin_cents;
-            let conservative_fair = (100.0 * estimate.p_yes_low).floor() as i64 - strat.safety_margin_cents;
+            let conservative_fair =
+                (100.0 * estimate.p_yes_low).floor() as i64 - strat.safety_margin_cents;
 
             // Per-contract fee for entry + assumed exit.
             let entry_fee_per_contract = self.fees.per_contract_taker_fee(price.yes_ask);
-            let exit_fee_per_contract = self.fees.per_contract_taker_fee(strat.exit_threshold_cents);
-            let round_trip_fee_per_contract = (entry_fee_per_contract + exit_fee_per_contract).ceil() as i64;
+            let exit_fee_per_contract =
+                self.fees.per_contract_taker_fee(strat.exit_threshold_cents);
+            let round_trip_fee_per_contract =
+                (entry_fee_per_contract + exit_fee_per_contract).ceil() as i64;
 
             let gross_edge = fair_cents - price.yes_ask;
             let net_edge = gross_edge - round_trip_fee_per_contract;
-            let conservative_net_edge = conservative_fair - price.yes_ask - round_trip_fee_per_contract;
+            let conservative_net_edge =
+                conservative_fair - price.yes_ask - round_trip_fee_per_contract;
 
             debug!(
                 "{}: p_yes={:.3} [{:.3}–{:.3}] conf={:.2}, fair={}¢, ask={}¢, \
                  gross_edge={}¢, fees={}¢/c, net_edge={}¢, cons_net={}¢",
-                ticker, estimate.p_yes, estimate.p_yes_low, estimate.p_yes_high,
-                estimate.confidence, fair_cents, price.yes_ask,
-                gross_edge, round_trip_fee_per_contract, net_edge, conservative_net_edge
+                ticker,
+                estimate.p_yes,
+                estimate.p_yes_low,
+                estimate.p_yes_high,
+                estimate.confidence,
+                fair_cents,
+                price.yes_ask,
+                gross_edge,
+                round_trip_fee_per_contract,
+                net_edge,
+                conservative_net_edge
             );
 
             let current_pos = positions.get(ticker).copied().unwrap_or(0);
@@ -177,8 +189,16 @@ impl StrategyEngine {
                 info!(
                     "ENTRY: {} — BUY YES @ {}¢ x{} (fair={}¢, net_edge={}¢, fees≈{}¢, \
                      p_yes={:.3} [{:.3}–{:.3}], conf={:.2})",
-                    ticker, price.yes_ask, count, fair_cents, net_edge, estimated_fee,
-                    estimate.p_yes, estimate.p_yes_low, estimate.p_yes_high, estimate.confidence
+                    ticker,
+                    price.yes_ask,
+                    count,
+                    fair_cents,
+                    net_edge,
+                    estimated_fee,
+                    estimate.p_yes,
+                    estimate.p_yes_low,
+                    estimate.p_yes_high,
+                    estimate.confidence
                 );
 
                 intents.push(OrderIntent {
@@ -203,8 +223,12 @@ impl StrategyEngine {
 
                 info!(
                     "EXIT: {} — SELL YES @ {}¢ x{} (bid={}¢ >= thresh={}¢, fee≈{}¢)",
-                    ticker, price.yes_bid, current_pos,
-                    price.yes_bid, strat.exit_threshold_cents, estimated_fee
+                    ticker,
+                    price.yes_bid,
+                    current_pos,
+                    price.yes_bid,
+                    strat.exit_threshold_cents,
+                    estimated_fee
                 );
 
                 intents.push(OrderIntent {
@@ -377,7 +401,10 @@ mod tests {
         let engine = StrategyEngine::new(config);
 
         let mut markets = HashMap::new();
-        markets.insert("KXHIGHNYC-TEST".into(), make_market("KXHIGHNYC-TEST", 8, 12));
+        markets.insert(
+            "KXHIGHNYC-TEST".into(),
+            make_market("KXHIGHNYC-TEST", 8, 12),
+        );
 
         let mut prices = HashMap::new();
         prices.insert("KXHIGHNYC-TEST".into(), make_price(8, 12));
@@ -399,17 +426,23 @@ mod tests {
         let engine = StrategyEngine::new(config);
 
         let mut markets = HashMap::new();
-        markets.insert("KXHIGHNYC-TEST".into(), make_market("KXHIGHNYC-TEST", 8, 12));
+        markets.insert(
+            "KXHIGHNYC-TEST".into(),
+            make_market("KXHIGHNYC-TEST", 8, 12),
+        );
 
         let mut prices = HashMap::new();
         // Make price data stale (6 min ago, threshold is 5 min).
-        prices.insert("KXHIGHNYC-TEST".into(), PriceEntry {
-            yes_bid: 8,
-            yes_ask: 12,
-            last_price: 10,
-            volume: 100,
-            updated_at: Instant::now() - Duration::from_secs(360),
-        });
+        prices.insert(
+            "KXHIGHNYC-TEST".into(),
+            PriceEntry {
+                yes_bid: 8,
+                yes_ask: 12,
+                last_price: 10,
+                volume: 100,
+                updated_at: Instant::now() - Duration::from_secs(360),
+            },
+        );
 
         let fc = new_forecast_cache();
         insert_forecast(&fc, "New York City", 80.0, 60.0, 3.0);
@@ -426,7 +459,10 @@ mod tests {
         let engine = StrategyEngine::new(config);
 
         let mut markets = HashMap::new();
-        markets.insert("KXHIGHNYC-TEST".into(), make_market("KXHIGHNYC-TEST", 48, 52));
+        markets.insert(
+            "KXHIGHNYC-TEST".into(),
+            make_market("KXHIGHNYC-TEST", 48, 52),
+        );
 
         let mut prices = HashMap::new();
         prices.insert("KXHIGHNYC-TEST".into(), make_price(48, 52));
@@ -448,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_fee_adjusted_edge_blocks_thin_margin() {
-        // Edge of 5¢ but round-trip fees ~2¢ → net_edge=3¢ (should still pass with default 5¢ threshold... 
+        // Edge of 5¢ but round-trip fees ~2¢ → net_edge=3¢ (should still pass with default 5¢ threshold...
         // But let's set edge threshold to 4¢ and verify fees are correctly subtracted).
         let mut config = default_config();
         config.strategy.edge_threshold_cents = 4;
@@ -459,7 +495,10 @@ mod tests {
         // This should easily pass. Let's test a marginal case instead.
         // Market at ask=15, strike=50, forecast high=52 → p_yes ≈ ~0.75, fair=75-3=72, edge=72-15=57
         let mut markets = HashMap::new();
-        markets.insert("KXHIGHNYC-TEST".into(), make_market("KXHIGHNYC-TEST", 13, 15));
+        markets.insert(
+            "KXHIGHNYC-TEST".into(),
+            make_market("KXHIGHNYC-TEST", 13, 15),
+        );
 
         let mut prices = HashMap::new();
         prices.insert("KXHIGHNYC-TEST".into(), make_price(13, 15));
@@ -485,7 +524,10 @@ mod tests {
         let engine = StrategyEngine::new(config);
 
         let mut markets = HashMap::new();
-        markets.insert("KXHIGHNYC-TEST".into(), make_market("KXHIGHNYC-TEST", 8, 12));
+        markets.insert(
+            "KXHIGHNYC-TEST".into(),
+            make_market("KXHIGHNYC-TEST", 8, 12),
+        );
 
         let mut prices = HashMap::new();
         prices.insert("KXHIGHNYC-TEST".into(), make_price(8, 12));
@@ -523,7 +565,8 @@ mod tests {
         assert!(
             count_strong >= count_weak,
             "Strong edge ({}) should size >= weak edge ({})",
-            count_strong, count_weak
+            count_strong,
+            count_weak
         );
     }
 
@@ -543,7 +586,10 @@ mod tests {
         let engine = StrategyEngine::new(config);
 
         let mut markets = HashMap::new();
-        markets.insert("KXHIGHNYC-TEST".into(), make_market("KXHIGHNYC-TEST", 48, 52));
+        markets.insert(
+            "KXHIGHNYC-TEST".into(),
+            make_market("KXHIGHNYC-TEST", 48, 52),
+        );
 
         let mut prices = HashMap::new();
         prices.insert("KXHIGHNYC-TEST".into(), make_price(48, 52));

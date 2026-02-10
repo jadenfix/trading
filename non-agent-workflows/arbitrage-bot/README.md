@@ -25,12 +25,15 @@ A high-performance arbitrage bot for Kalshi prediction markets.
    - Optional endpoint overrides for network/DNS issues:
      - `KALSHI_API_BASE_URL` (REST base URL, e.g. `https://api.elections.kalshi.com`)
      - `KALSHI_WS_URL` (WS URL, e.g. `wss://api.elections.kalshi.com/trade-api/ws/v2`)
-  - Optional WS auth toggle for public ticker feed debugging:
-    - `KALSHI_WS_DISABLE_AUTH=1` (skips WS auth headers)
-  - Trade journal:
-    - Bot writes JSONL trade/audit events to `<repo-root>/TRADES` by default
-      (e.g. `/Users/jadenfix/Desktop/trading/TRADES/trades-YYYY-MM-DD.jsonl`).
-    - Override location with `TRADES_DIR=/custom/path`.
+   - Optional WS auth toggle for public ticker feed debugging:
+     - `KALSHI_WS_DISABLE_AUTH=1` (skips WS auth headers)
+   - Trade journal:
+     - Bot writes JSONL trade/audit events to `<repo-root>/TRADES/arbitrage-bot` by default
+       (e.g. `/Users/jadenfix/Desktop/trading/TRADES/arbitrage-bot/trades-YYYY-MM-DD.jsonl`).
+     - Set `TRADES_DIR=/custom/root` to choose a different trades root. The bot still writes into
+       `TRADES_DIR/arbitrage-bot`.
+   - Heartbeat:
+     - Bot emits a 30-second `HEARTBEAT` log line so long runs do not appear stalled.
 
 2. **Run**:
    ```bash

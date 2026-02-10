@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Duration, Utc};
 use common::{EventInfo, MarketInfo};
 use tracing::{debug, info, warn};
 
@@ -57,7 +58,7 @@ pub struct UniverseBuilder;
 
 impl UniverseBuilder {
     /// Fetch all open events with nested markets and build arb groups.
-    pub async fn build(client: &KalshiRestClient) -> Vec<ArbGroup> {
+    pub async fn build(client: &KalshiRestClient, max_days_to_resolution: i64) -> Vec<ArbGroup> {
         info!("Building universe: fetching events with nested markets...");
 
         let events = match Self::fetch_events(client).await {
@@ -72,17 +73,25 @@ impl UniverseBuilder {
         info!("Fetched {} events", event_count);
 
         let mut groups = Vec::new();
+        let now = Utc::now();
 
         for event in events {
             // Only consider open markets.
             let open_markets: Vec<MarketInfo> = event
                 .markets
                 .iter()
-                .filter(|m| m.status == "active" || m.status == "open")
+                .filter(|m| {
+                    (m.status == "active" || m.status == "open")
+                        && Self::resolves_within_window(m, now, max_days_to_resolution)
+                })
                 .cloned()
                 .collect();
 
             if open_markets.is_empty() {
+                debug!(
+                    "{}: skipping event (no markets within {}-day resolution window)",
+                    event.event_ticker, max_days_to_resolution
+                );
                 continue;
             }
 
@@ -126,6 +135,23 @@ impl UniverseBuilder {
         );
 
         groups
+    }
+
+    fn resolves_within_window(
+        market: &MarketInfo,
+        now: DateTime<Utc>,
+        max_days_to_resolution: i64,
+    ) -> bool {
+        if max_days_to_resolution <= 0 {
+            return false;
+        }
+
+        let Some(resolution_time) = market.close_time.or(market.expiration_time) else {
+            return false;
+        };
+
+        let time_remaining = resolution_time - now;
+        time_remaining > Duration::zero() && time_remaining < Duration::days(max_days_to_resolution)
     }
 
     /// Fetch events from Kalshi API with pagination.
@@ -232,7 +258,6 @@ impl UniverseBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, Utc};
 
     fn make_market(ticker: &str, title: &str) -> MarketInfo {
         MarketInfo {
@@ -342,5 +367,31 @@ mod tests {
         let (exhaustive, edge) = UniverseBuilder::classify_exhaustiveness(&true, &[a, b]);
         assert!(!exhaustive);
         assert_eq!(edge, Some(EdgeCase::PartialSet));
+    }
+
+    #[test]
+    fn test_resolves_within_window_allows_market_inside_window() {
+        let mut market = make_market("A-YES", "Outcome A");
+        let now = Utc::now();
+        market.close_time = Some(now + Duration::days(5));
+
+        assert!(UniverseBuilder::resolves_within_window(&market, now, 11));
+    }
+
+    #[test]
+    fn test_resolves_within_window_rejects_market_outside_window() {
+        let mut market = make_market("A-YES", "Outcome A");
+        let now = Utc::now();
+        market.close_time = Some(now + Duration::days(15));
+
+        assert!(!UniverseBuilder::resolves_within_window(&market, now, 11));
+    }
+
+    #[test]
+    fn test_resolves_within_window_rejects_missing_resolution_time() {
+        let market = make_market("A-YES", "Outcome A");
+        let now = Utc::now();
+
+        assert!(!UniverseBuilder::resolves_within_window(&market, now, 11));
     }
 }

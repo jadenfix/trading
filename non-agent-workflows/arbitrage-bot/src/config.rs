@@ -76,6 +76,9 @@ fn validate_config(config: &ArbBotConfig) -> Result<(), Error> {
     if config.arb.min_leg_size <= 0 {
         issues.push("arb.min_leg_size must be > 0".into());
     }
+    if config.arb.max_days_to_resolution <= 0 {
+        issues.push("arb.max_days_to_resolution must be > 0".into());
+    }
 
     if config.timing.eval_interval_ms == 0 {
         issues.push("timing.eval_interval_ms must be > 0".into());

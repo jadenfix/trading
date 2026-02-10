@@ -29,6 +29,10 @@ pub struct BotConfig {
     #[serde(default)]
     pub strategy: StrategyConfig,
 
+    /// Risk management parameters.
+    #[serde(default)]
+    pub risk: RiskConfig,
+
     /// Timing parameters (seconds).
     #[serde(default)]
     pub timing: TimingConfig,
@@ -89,6 +93,34 @@ pub struct StrategyConfig {
     pub min_hours_before_close: f64,
 }
 
+/// Risk management thresholds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskConfig {
+    /// Max position per market in cents (e.g., 500 = $5).
+    #[serde(default = "default_max_position")]
+    pub max_position_cents: i64,
+
+    /// Max total portfolio exposure in cents.
+    #[serde(default = "default_max_total_exposure")]
+    pub max_total_exposure_cents: i64,
+
+    /// Max exposure per city (across all correlated markets).
+    #[serde(default = "default_max_city_exposure")]
+    pub max_city_exposure_cents: i64,
+
+    /// Max daily drawdown in cents before circuit-breaker halts buys.
+    #[serde(default = "default_max_daily_loss")]
+    pub max_daily_loss_cents: i64,
+
+    /// Max orders per minute (sliding window).
+    #[serde(default = "default_max_orders_per_min")]
+    pub max_orders_per_minute: u32,
+
+    /// Minimum balance to maintain (cents).
+    #[serde(default = "default_min_balance")]
+    pub min_balance_cents: i64,
+}
+
 /// Timing configuration (all values in seconds).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimingConfig {
@@ -142,6 +174,22 @@ fn default_max_spread() -> i64 {
 }
 fn default_min_hours() -> f64 {
     2.0
+}
+
+fn default_max_total_exposure() -> i64 {
+    5000
+}
+fn default_max_city_exposure() -> i64 {
+    1500
+}
+fn default_max_daily_loss() -> i64 {
+    2000
+}
+fn default_max_orders_per_min() -> u32 {
+    10
+}
+fn default_min_balance() -> i64 {
+    100
 }
 
 fn default_scan_interval() -> u64 {
@@ -247,6 +295,19 @@ impl Default for TimingConfig {
     }
 }
 
+impl Default for RiskConfig {
+    fn default() -> Self {
+        Self {
+            max_position_cents: default_max_position(),
+            max_total_exposure_cents: default_max_total_exposure(),
+            max_city_exposure_cents: default_max_city_exposure(),
+            max_daily_loss_cents: default_max_daily_loss(),
+            max_orders_per_minute: default_max_orders_per_min(),
+            min_balance_cents: default_min_balance(),
+        }
+    }
+}
+
 impl Default for BotConfig {
     fn default() -> Self {
         Self {
@@ -256,6 +317,7 @@ impl Default for BotConfig {
             cities: default_cities(),
             series_prefixes: default_series_prefixes(),
             strategy: StrategyConfig::default(),
+            risk: RiskConfig::default(),
             timing: TimingConfig::default(),
         }
     }

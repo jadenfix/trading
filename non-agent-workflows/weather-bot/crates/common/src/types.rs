@@ -81,6 +81,74 @@ pub struct OrderIntent {
     pub count: i64,
     /// Reason for the trade (for logging).
     pub reason: String,
+    /// Estimated fee in cents for this order.
+    #[serde(skip_serializing)]
+    pub estimated_fee_cents: i64,
+    /// Forecast confidence (0.0–1.0) at time of signal generation.
+    #[serde(skip_serializing)]
+    pub confidence: f64,
+}
+
+// ── Kalshi Fee Schedule ───────────────────────────────────────────────
+
+/// Kalshi fee calculator (Feb 2026 schedule).
+///
+/// Taker formula: `ceil_to_cent(coeff × C × P × (1 − P))`
+/// where P is price in dollars and C is contract count.
+///
+/// Maker formula: same but with ¼ the coefficient.
+#[derive(Debug, Clone)]
+pub struct FeeSchedule {
+    /// Taker coefficient (0.07 for weather markets).
+    pub taker_coeff: f64,
+    /// Maker coefficient (0.0175 for weather markets).
+    pub maker_coeff: f64,
+}
+
+impl FeeSchedule {
+    /// Standard fee schedule for weather markets.
+    pub fn weather() -> Self {
+        Self {
+            taker_coeff: 0.07,
+            maker_coeff: 0.0175,
+        }
+    }
+
+    /// Compute taker fee in cents (rounded up to next cent).
+    pub fn taker_fee_cents(&self, count: i64, price_cents: i64) -> i64 {
+        self.fee_cents(self.taker_coeff, count, price_cents)
+    }
+
+    /// Compute maker fee in cents (rounded up to next cent).
+    pub fn maker_fee_cents(&self, count: i64, price_cents: i64) -> i64 {
+        self.fee_cents(self.maker_coeff, count, price_cents)
+    }
+
+    /// Estimate round-trip cost in cents (taker entry + taker exit).
+    ///
+    /// Conservative: assumes taker on both legs.
+    pub fn round_trip_fee_cents(&self, count: i64, entry_cents: i64, exit_cents: i64) -> i64 {
+        self.taker_fee_cents(count, entry_cents) + self.taker_fee_cents(count, exit_cents)
+    }
+
+    /// Per-contract taker fee in fractional cents (for edge calculations).
+    pub fn per_contract_taker_fee(&self, price_cents: i64) -> f64 {
+        let p = price_cents as f64 / 100.0;
+        self.taker_coeff * p * (1.0 - p) * 100.0 // result in cents
+    }
+
+    fn fee_cents(&self, coeff: f64, count: i64, price_cents: i64) -> i64 {
+        let p = price_cents as f64 / 100.0;
+        let fee_dollars = coeff * (count as f64) * p * (1.0 - p);
+        // Round up to next cent → convert to cents and ceil.
+        (fee_dollars * 100.0).ceil() as i64
+    }
+}
+
+impl Default for FeeSchedule {
+    fn default() -> Self {
+        Self::weather()
+    }
 }
 
 /// Order request body for Kalshi API.
@@ -251,3 +319,59 @@ pub struct WsMessage {
     pub msg: Option<serde_json::Value>,
     pub id: Option<u64>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_taker_fee_50c_100_contracts() {
+        // Kalshi docs: 100 contracts at 50¢ → $1.75
+        let fs = FeeSchedule::weather();
+        let fee = fs.taker_fee_cents(100, 50);
+        assert_eq!(fee, 175, "100 contracts @ 50¢ should be 175¢ ($1.75)");
+    }
+
+    #[test]
+    fn test_taker_fee_1c_100_contracts() {
+        // Kalshi docs: 100 contracts at 1¢ → $0.07
+        let fs = FeeSchedule::weather();
+        let fee = fs.taker_fee_cents(100, 1);
+        assert_eq!(fee, 7, "100 contracts @ 1¢ should be 7¢ ($0.07)");
+    }
+
+    #[test]
+    fn test_taker_fee_99c_symmetric() {
+        // P(1-P) is symmetric: fee at 99¢ == fee at 1¢
+        let fs = FeeSchedule::weather();
+        let fee_1 = fs.taker_fee_cents(100, 1);
+        let fee_99 = fs.taker_fee_cents(100, 99);
+        assert_eq!(fee_1, fee_99, "Fee should be symmetric around 50¢");
+    }
+
+    #[test]
+    fn test_maker_fee_quarter_of_taker() {
+        let fs = FeeSchedule::weather();
+        // Maker coefficient is ¼ of taker
+        assert!((fs.maker_coeff - fs.taker_coeff / 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_round_trip_fee() {
+        let fs = FeeSchedule::weather();
+        let rt = fs.round_trip_fee_cents(10, 20, 45);
+        let entry = fs.taker_fee_cents(10, 20);
+        let exit = fs.taker_fee_cents(10, 45);
+        assert_eq!(rt, entry + exit);
+    }
+
+    #[test]
+    fn test_fee_ceil_rounding() {
+        // Verify ceil behavior: even partial cents round up
+        let fs = FeeSchedule::weather();
+        // 1 contract at 50¢: 0.07 * 1 * 0.5 * 0.5 = $0.0175 → ceil to $0.02 = 2¢
+        let fee = fs.taker_fee_cents(1, 50);
+        assert_eq!(fee, 2, "Fractional cents should round up");
+    }
+}
+

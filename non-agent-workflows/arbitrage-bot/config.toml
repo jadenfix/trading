@@ -1,0 +1,54 @@
+# Arbitrage Bot — Default Configuration
+# Override with environment variables or .env file.
+# KALSHI_API_KEY and KALSHI_SECRET_KEY must be set in .env or environment.
+
+# Use demo environment (set to false for production)
+use_demo = true
+
+[arb]
+# Minimum net profit in cents to trigger a trade
+min_profit_cents = 3
+# Slippage buffer in cents per leg (added to ask / subtracted from bid)
+slippage_buffer_cents = 1
+# Enable EV-mode for non-exhaustive sets
+ev_mode_enabled = true
+# Extra buffer in cents required for EV-mode trades (on top of min_profit)
+tie_buffer_cents = 5
+# Minimum top-of-book size per leg to consider tradeable
+min_leg_size = 5
+# Default quantity per arb leg
+default_qty = 10
+
+[timing]
+# Universe (event/market) refresh interval in seconds
+universe_refresh_secs = 900
+# Arb evaluation interval in milliseconds
+eval_interval_ms = 1000
+# Max age for quote data before considered stale (seconds)
+quote_stale_secs = 2
+# Price data staleness for general use (seconds)
+price_stale_secs = 300
+
+[risk]
+# Max exposure in cents per event
+max_exposure_per_event_cents = 1000
+# Max total portfolio exposure in cents
+max_total_exposure_cents = 5000
+# Max arb attempts per group per minute
+max_attempts_per_group_per_min = 3
+# Max loss in cents for partial-fill unwind
+max_unwind_loss_cents = 50
+# Kill switch: halt after this many consecutive WS disconnects
+kill_switch_disconnect_count = 5
+# Max orders per minute (sliding window)
+max_orders_per_minute = 10
+# Minimum balance to maintain (cents)
+min_balance_cents = 100
+# Max daily drawdown in cents before circuit-breaker
+max_daily_loss_cents = 2000
+
+[execution]
+# Order time-in-force: "fok" (fill-or-kill) or "gtc" (good-til-cancel)
+time_in_force = "fok"
+# Unwind policy on partial fills: "cross_spread" or "cancel_only"
+unwind_policy = "cross_spread"

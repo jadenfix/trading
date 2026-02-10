@@ -132,6 +132,29 @@ fn legs_json(opp: &ArbOpportunity) -> Vec<serde_json::Value> {
         .collect()
 }
 
+fn estimate_entry_debit_cents(opp: &ArbOpportunity, fees: &ArbFeeModel) -> Option<i64> {
+    if opp.qty <= 0 {
+        return None;
+    }
+
+    match opp.direction {
+        ArbDirection::BuySet => {
+            let mut total = 0i64;
+            for leg in &opp.legs {
+                let exec_price = leg.price_cents.saturating_add(fees.slippage_buffer);
+                if !(1..=99).contains(&exec_price) {
+                    return None;
+                }
+                let notional = exec_price.saturating_mul(opp.qty);
+                let taker_fee = fees.schedule.taker_fee_cents(opp.qty, exec_price);
+                total = total.saturating_add(notional.saturating_add(taker_fee));
+            }
+            Some(total.max(0))
+        }
+        ArbDirection::SellSet => Some(0),
+    }
+}
+
 struct TradeJournal {
     dir: PathBuf,
     day_key: String,
@@ -632,8 +655,29 @@ async fn main() {
                     continue;
                 }
 
+                let projected_entry_debit = match estimate_entry_debit_cents(&opp, &fees) {
+                    Some(v) => v,
+                    None => {
+                        warn!(
+                            "Skipping execution for {}: unable to estimate entry debit",
+                            opp.group_event_ticker
+                        );
+                        write_trade_event(
+                            &mut trade_journal,
+                            json!({
+                                "ts": now_iso(),
+                                "kind": "execution_skip",
+                                "reason": "entry_debit_estimate_failed",
+                                "fingerprint": fingerprint,
+                                "event_ticker": &opp.group_event_ticker,
+                            }),
+                        );
+                        continue;
+                    }
+                };
+
                 // Risk check.
-                if let Err(e) = risk.check(&opp) {
+                if let Err(e) = risk.check(&opp, projected_entry_debit) {
                     warn!("Risk Rejected: {}", e);
                     risk_rejects_since_heartbeat = risk_rejects_since_heartbeat.saturating_add(1);
                     write_trade_event(
@@ -643,6 +687,7 @@ async fn main() {
                             "kind": "risk_rejected",
                             "fingerprint": fingerprint,
                             "event_ticker": &opp.group_event_ticker,
+                            "projected_entry_debit_cents": projected_entry_debit,
                             "error": e.to_string()
                         }),
                     );

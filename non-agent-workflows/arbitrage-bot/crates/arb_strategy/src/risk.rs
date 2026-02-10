@@ -126,7 +126,15 @@ impl ArbRiskManager {
     }
 
     /// Check if an arb opportunity is safe to execute.
-    pub fn check(&mut self, opp: &ArbOpportunity) -> Result<(), Error> {
+    ///
+    /// `estimated_entry_debit_cents` should be a conservative estimate of
+    /// immediate cash spent on entry (for buy-set style trades). This allows
+    /// reserve protection before order submission.
+    pub fn check(
+        &mut self,
+        opp: &ArbOpportunity,
+        estimated_entry_debit_cents: i64,
+    ) -> Result<(), Error> {
         if self.kill_switch_engaged {
             return Err(Error::RiskViolation(
                 "Kill switch engaged; refusing new orders".into(),
@@ -143,6 +151,26 @@ impl ArbRiskManager {
             ));
         }
         self.check_balance_limits()?;
+
+        if estimated_entry_debit_cents < 0 {
+            return Err(Error::RiskViolation(
+                "Estimated entry debit cannot be negative".into(),
+            ));
+        }
+        if estimated_entry_debit_cents > 0 {
+            let balance = self.latest_balance_cents.ok_or_else(|| {
+                Error::RiskViolation(
+                    "Account balance has not been initialized; refusing live execution".into(),
+                )
+            })?;
+            let projected = balance - estimated_entry_debit_cents;
+            if projected < self.config.min_balance_cents {
+                return Err(Error::RiskViolation(format!(
+                    "Projected balance below minimum after trade: {} - {} = {} < {}",
+                    balance, estimated_entry_debit_cents, projected, self.config.min_balance_cents
+                )));
+            }
+        }
 
         let now = Instant::now();
 
@@ -276,9 +304,9 @@ mod tests {
         risk.update_balance(1_000).unwrap();
 
         let opp = make_opp(2, 1);
-        assert!(risk.check(&opp).is_ok());
+        assert!(risk.check(&opp, 0).is_ok());
 
-        let err = risk.check(&opp).unwrap_err();
+        let err = risk.check(&opp, 0).unwrap_err();
         assert!(err.to_string().contains("Order rate limit"));
     }
 
@@ -301,5 +329,17 @@ mod tests {
         let err = risk.record_critical_failure("second failure").unwrap_err();
         assert!(err.to_string().contains("Kill switch engaged"));
         assert!(risk.kill_switch_engaged());
+    }
+
+    #[test]
+    fn test_projected_balance_guard_blocks_cash_drain() {
+        let mut risk = ArbRiskManager::new(test_config());
+        risk.update_balance(1_000).unwrap();
+
+        let opp = make_opp(2, 1);
+        let err = risk.check(&opp, 950).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Projected balance below minimum after trade"));
     }
 }

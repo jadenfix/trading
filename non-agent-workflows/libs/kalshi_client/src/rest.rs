@@ -4,14 +4,56 @@
 //! All methods are rate-limited and authenticated via RSA-PSS.
 
 use common::{
-    BalanceResponse, CreateOrderRequest, CreateOrderResponse, Error, MarketInfo, MarketsResponse,
-    OrderIntent, PositionsResponse, Side, Action, OrderType,
+    Action, BalanceResponse, CreateOrderRequest, CreateOrderResponse, Error, MarketInfo,
+    MarketsResponse, OrderIntent, OrderType, PositionsResponse, Side,
 };
-use tracing::{debug, warn};
+use std::error::Error as StdError;
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::auth::KalshiAuth;
 use crate::rate_limit::RateLimiter;
+
+const DEMO_BASE_URL: &str = "https://demo-api.kalshi.co";
+const PROD_BASE_URL: &str = "https://api.elections.kalshi.com";
+
+fn normalize_base_url(raw: &str) -> String {
+    raw.trim().trim_end_matches('/').to_string()
+}
+
+fn resolve_rest_base_url(use_demo: bool) -> String {
+    if let Ok(override_url) = std::env::var("KALSHI_API_BASE_URL") {
+        let normalized = normalize_base_url(&override_url);
+        if !normalized.is_empty() {
+            info!("Using KALSHI_API_BASE_URL override: {}", normalized);
+            return normalized;
+        }
+        warn!("Ignoring empty KALSHI_API_BASE_URL override");
+    }
+
+    if use_demo {
+        DEMO_BASE_URL.to_string()
+    } else {
+        PROD_BASE_URL.to_string()
+    }
+}
+
+fn format_reqwest_error(err: &reqwest::Error) -> String {
+    // Keep chained causes so network failures (DNS/TLS/socket) are visible.
+    let mut message = err.to_string();
+    let mut source = err.source();
+
+    while let Some(cause) = source {
+        let cause_msg = cause.to_string();
+        if !cause_msg.is_empty() && !message.contains(&cause_msg) {
+            message.push_str(": ");
+            message.push_str(&cause_msg);
+        }
+        source = cause.source();
+    }
+
+    message
+}
 
 /// Async REST client for Kalshi trade API.
 #[derive(Debug, Clone)]
@@ -25,13 +67,9 @@ pub struct KalshiRestClient {
 impl KalshiRestClient {
     /// Create a new REST client.
     ///
-    /// * `use_demo` — if true, points to `https://demo-api.kalshi.co`.
+    /// * `use_demo` — if true, points to demo URL unless `KALSHI_API_BASE_URL` is set.
     pub fn new(auth: KalshiAuth, use_demo: bool) -> Self {
-        let base_url = if use_demo {
-            "https://demo-api.kalshi.co".to_string()
-        } else {
-            "https://api.elections.kalshi.com".to_string()
-        };
+        let base_url = resolve_rest_base_url(use_demo);
 
         let client = reqwest::Client::builder()
             .pool_max_idle_per_host(4)
@@ -89,7 +127,7 @@ impl KalshiRestClient {
             let resp = req
                 .send()
                 .await
-                .map_err(|e| Error::Http(e.to_string()))?;
+                .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
 
             let status_code = resp.status().as_u16();
             if status_code != 200 {
@@ -103,7 +141,7 @@ impl KalshiRestClient {
             let body: MarketsResponse = resp
                 .json()
                 .await
-                .map_err(|e| Error::Http(e.to_string()))?;
+                .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
 
             let count = body.markets.len();
             all_markets.extend(body.markets);
@@ -132,7 +170,7 @@ impl KalshiRestClient {
             .headers(headers)
             .send()
             .await
-            .map_err(|e| Error::Http(e.to_string()))?;
+            .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
 
         let status_code = resp.status().as_u16();
         if status_code != 200 {
@@ -151,7 +189,7 @@ impl KalshiRestClient {
         let w: Wrapper = resp
             .json()
             .await
-            .map_err(|e| Error::Http(e.to_string()))?;
+            .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
 
         Ok(w.market)
     }
@@ -169,7 +207,7 @@ impl KalshiRestClient {
             .headers(headers)
             .send()
             .await
-            .map_err(|e| Error::Http(e.to_string()))?;
+            .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
 
         let status_code = resp.status().as_u16();
         if status_code != 200 {
@@ -183,7 +221,7 @@ impl KalshiRestClient {
         let bal: BalanceResponse = resp
             .json()
             .await
-            .map_err(|e| Error::Http(e.to_string()))?;
+            .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
 
         Ok(bal.balance)
     }
@@ -212,7 +250,7 @@ impl KalshiRestClient {
             let resp = req
                 .send()
                 .await
-                .map_err(|e| Error::Http(e.to_string()))?;
+                .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
 
             let status_code = resp.status().as_u16();
             if status_code != 200 {
@@ -226,12 +264,16 @@ impl KalshiRestClient {
             let body: PositionsResponse = resp
                 .json()
                 .await
-                .map_err(|e| Error::Http(e.to_string()))?;
+                .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
 
             let count = body.market_positions.len();
             all_positions.extend(body.market_positions);
 
-            debug!("Fetched {} positions (total: {})", count, all_positions.len());
+            debug!(
+                "Fetched {} positions (total: {})",
+                count,
+                all_positions.len()
+            );
 
             match body.cursor {
                 Some(c) if !c.is_empty() => cursor = Some(c),
@@ -245,10 +287,7 @@ impl KalshiRestClient {
     // ── Write endpoints ───────────────────────────────────────────────
 
     /// Place an order via the Kalshi API.
-    pub async fn create_order(
-        &self,
-        intent: &OrderIntent,
-    ) -> Result<CreateOrderResponse, Error> {
+    pub async fn create_order(&self, intent: &OrderIntent) -> Result<CreateOrderResponse, Error> {
         self.limiter.wait_write().await;
 
         let path = "/trade-api/v2/portfolio/orders";
@@ -275,8 +314,14 @@ impl KalshiRestClient {
 
         debug!(
             "Creating order: {} {} {} @ {}¢ x{} ({})",
-            match intent.action { Action::Buy => "BUY", Action::Sell => "SELL" },
-            match intent.side { Side::Yes => "YES", Side::No => "NO" },
+            match intent.action {
+                Action::Buy => "BUY",
+                Action::Sell => "SELL",
+            },
+            match intent.side {
+                Side::Yes => "YES",
+                Side::No => "NO",
+            },
             intent.ticker,
             intent.price_cents,
             intent.count,
@@ -290,12 +335,14 @@ impl KalshiRestClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| Error::Http(e.to_string()))?;
+            .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
 
         let status_code = resp.status().as_u16();
         if status_code == 429 {
             warn!("Rate limited on order creation");
-            return Err(Error::RateLimited { retry_after_ms: 1000 });
+            return Err(Error::RateLimited {
+                retry_after_ms: 1000,
+            });
         }
         if status_code != 200 && status_code != 201 {
             let body = resp.text().await.unwrap_or_default();
@@ -308,13 +355,11 @@ impl KalshiRestClient {
         let order_resp: CreateOrderResponse = resp
             .json()
             .await
-            .map_err(|e| Error::Http(e.to_string()))?;
+            .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
 
         debug!(
             "Order placed: id={} status={} fill={}",
-            order_resp.order.order_id,
-            order_resp.order.status,
-            order_resp.order.fill_count,
+            order_resp.order.order_id, order_resp.order.status, order_resp.order.fill_count,
         );
 
         Ok(order_resp)
@@ -333,7 +378,7 @@ impl KalshiRestClient {
             .headers(headers)
             .send()
             .await
-            .map_err(|e| Error::Http(e.to_string()))?;
+            .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
 
         let status_code = resp.status().as_u16();
         if status_code != 200 && status_code != 204 {
@@ -374,7 +419,10 @@ impl KalshiRestClient {
             req = req.query(&[("cursor", c)]);
         }
 
-        let resp = req.send().await.map_err(|e| Error::Http(e.to_string()))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
 
         let status_code = resp.status().as_u16();
         if status_code != 200 {
@@ -385,7 +433,10 @@ impl KalshiRestClient {
             });
         }
 
-        let wrapper: common::EventsResponse = resp.json().await.map_err(|e| Error::Http(format!("JSON decode: {}", e)))?;
+        let wrapper: common::EventsResponse = resp
+            .json()
+            .await
+            .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
         Ok((wrapper.events, wrapper.cursor))
     }
 
@@ -408,7 +459,7 @@ impl KalshiRestClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| Error::Http(e.to_string()))?;
+            .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
 
         let status_code = resp.status().as_u16();
         if status_code != 200 && status_code != 201 {
@@ -418,8 +469,11 @@ impl KalshiRestClient {
                 message: body,
             });
         }
-            
-        let wrapper: common::BatchOrderResponse = resp.json().await.map_err(|e| Error::Http(format!("JSON decode: {}", e)))?;
+
+        let wrapper: common::BatchOrderResponse = resp
+            .json()
+            .await
+            .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
         Ok(wrapper)
     }
 }

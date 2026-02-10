@@ -30,9 +30,10 @@ impl RiskManager {
 
     /// Legacy constructor for backward compatibility.
     pub fn from_max_position(max_position_cents: i64) -> Self {
-        let mut config = RiskConfig::default();
-        config.max_position_cents = max_position_cents;
-        Self::new(config)
+        Self::new(RiskConfig {
+            max_position_cents,
+            ..Default::default()
+        })
     }
 
     /// Set the session start balance (call once at startup after auth).
@@ -48,7 +49,7 @@ impl RiskManager {
         self.order_timestamps.push_back(Instant::now());
         // Prune old entries (>60s ago).
         let cutoff = Instant::now() - std::time::Duration::from_secs(60);
-        while self.order_timestamps.front().map_or(false, |t| *t < cutoff) {
+        while self.order_timestamps.front().is_some_and(|t| *t < cutoff) {
             self.order_timestamps.pop_front();
         }
     }

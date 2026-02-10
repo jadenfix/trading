@@ -12,7 +12,7 @@ pub mod risk;
 pub mod universe;
 
 pub use arb::{ArbDirection, ArbEvaluator, ArbLeg, ArbOpportunity};
-pub use exec::ArbExecutor;
+pub use exec::{ArbExecutor, ExecutionOutcome};
 pub use fees::ArbFeeModel;
 pub use quotes::QuoteBook;
 pub use risk::ArbRiskManager;

@@ -14,6 +14,9 @@ pub struct ArbConfig {
     #[serde(default = "default_true")]
     pub ev_mode_enabled: bool,
 
+    #[serde(default = "default_true")]
+    pub guaranteed_arb_only: bool,
+
     #[serde(default = "default_tie_buffer")]
     pub tie_buffer_cents: i64,
 
@@ -80,26 +83,66 @@ pub struct ExecutionConfig {
 
 // ── Defaults ──────────────────────────────────────────────────────────
 
-fn default_true() -> bool { true }
-fn default_min_profit() -> i64 { 3 }
-fn default_slippage() -> i64 { 1 }
-fn default_tie_buffer() -> i64 { 5 }
-fn default_min_leg_size() -> i64 { 5 }
-fn default_qty() -> i64 { 10 }
-fn default_universe_refresh() -> u64 { 900 }
-fn default_eval_interval() -> u64 { 1000 }
-fn default_quote_stale() -> u64 { 2 }
-fn default_price_stale() -> u64 { 300 }
-fn default_max_event_exposure() -> i64 { 1000 }
-fn default_max_total_exposure() -> i64 { 5000 }
-fn default_max_attempts() -> u32 { 3 }
-fn default_max_unwind_loss() -> i64 { 50 }
-fn default_kill_switch() -> u32 { 5 }
-fn default_max_orders_per_min() -> u32 { 10 }
-fn default_min_balance() -> i64 { 100 }
-fn default_max_daily_loss() -> i64 { 2000 }
-fn default_tif() -> String { "fok".into() }
-fn default_unwind_policy() -> String { "cross_spread".into() }
+fn default_true() -> bool {
+    true
+}
+fn default_min_profit() -> i64 {
+    1
+}
+fn default_slippage() -> i64 {
+    1
+}
+fn default_tie_buffer() -> i64 {
+    5
+}
+fn default_min_leg_size() -> i64 {
+    5
+}
+fn default_qty() -> i64 {
+    10
+}
+fn default_universe_refresh() -> u64 {
+    900
+}
+fn default_eval_interval() -> u64 {
+    1000
+}
+fn default_quote_stale() -> u64 {
+    120
+}
+fn default_price_stale() -> u64 {
+    300
+}
+fn default_max_event_exposure() -> i64 {
+    1000
+}
+fn default_max_total_exposure() -> i64 {
+    5000
+}
+fn default_max_attempts() -> u32 {
+    3
+}
+fn default_max_unwind_loss() -> i64 {
+    50
+}
+fn default_kill_switch() -> u32 {
+    5
+}
+fn default_max_orders_per_min() -> u32 {
+    10
+}
+fn default_min_balance() -> i64 {
+    100
+}
+fn default_max_daily_loss() -> i64 {
+    2000
+}
+fn default_tif() -> String {
+    "fok".into()
+}
+fn default_unwind_policy() -> String {
+    "cross_spread".into()
+}
 
 impl Default for ArbConfig {
     fn default() -> Self {
@@ -107,6 +150,7 @@ impl Default for ArbConfig {
             min_profit_cents: default_min_profit(),
             slippage_buffer_cents: default_slippage(),
             ev_mode_enabled: true,
+            guaranteed_arb_only: true,
             tie_buffer_cents: default_tie_buffer(),
             min_leg_size: default_min_leg_size(),
             default_qty: default_qty(),

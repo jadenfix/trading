@@ -37,14 +37,20 @@ impl ArbFeeModel {
     /// Net revenue from selling YES on all outcomes (cents).
     ///
     /// `Σ (bid_i - slippage) × qty - Σ fee(qty, bid_i - slippage)`
-    pub fn net_sell_set_revenue(&self, quotes: &[MarketQuote], qty: i64) -> i64 {
+    ///
+    /// Returns `None` when any leg has non-positive executable bid after
+    /// slippage, since that leg cannot be sold with a valid positive limit.
+    pub fn net_sell_set_revenue(&self, quotes: &[MarketQuote], qty: i64) -> Option<i64> {
         let mut total = 0i64;
         for q in quotes {
-            let effective_bid = (q.yes_bid - self.slippage_buffer).max(1);
+            let effective_bid = q.yes_bid - self.slippage_buffer;
+            if effective_bid <= 0 {
+                return None;
+            }
             let fee = self.schedule.taker_fee_cents(qty, effective_bid);
             total += effective_bid * qty - fee;
         }
-        total
+        Some(total)
     }
 
     /// Per-contract net cost for buying the complete set.
@@ -59,14 +65,20 @@ impl ArbFeeModel {
     }
 
     /// Per-contract net revenue for selling the complete set.
-    pub fn per_contract_sell_revenue(&self, quotes: &[MarketQuote]) -> i64 {
+    ///
+    /// Returns `None` when any leg has non-positive executable bid after
+    /// slippage.
+    pub fn per_contract_sell_revenue(&self, quotes: &[MarketQuote]) -> Option<i64> {
         let mut total = 0i64;
         for q in quotes {
-            let effective_bid = (q.yes_bid - self.slippage_buffer).max(1);
+            let effective_bid = q.yes_bid - self.slippage_buffer;
+            if effective_bid <= 0 {
+                return None;
+            }
             let fee_per = self.schedule.per_contract_taker_fee(effective_bid).ceil() as i64;
             total += effective_bid - fee_per;
         }
-        total
+        Some(total)
     }
 
     /// EV-discounted payout for a non-exhaustive set.
@@ -100,7 +112,7 @@ mod tests {
     #[test]
     fn test_buy_set_cost_simple() {
         let fee_model = ArbFeeModel::new(0); // No slippage
-        // Two markets: ask=40 and ask=55 → raw cost = 95¢/contract
+                                             // Two markets: ask=40 and ask=55 → raw cost = 95¢/contract
         let quotes = make_quotes(&[(38, 40), (53, 55)]);
         let cost = fee_model.net_buy_set_cost(&quotes, 1);
         // Cost = (40 + fee(1,40)) + (55 + fee(1,55))
@@ -115,9 +127,19 @@ mod tests {
         let fee_model = ArbFeeModel::new(0);
         // Two markets: bid=60 and bid=45 → raw revenue = 105¢/contract
         let quotes = make_quotes(&[(60, 65), (45, 50)]);
-        let rev = fee_model.net_sell_set_revenue(&quotes, 1);
+        let rev = fee_model.net_sell_set_revenue(&quotes, 1).unwrap();
         // Revenue = (60 - fee) + (45 - fee) < 105
         assert!(rev < 105, "Revenue should be reduced by fees: {}", rev);
+    }
+
+    #[test]
+    fn test_sell_set_revenue_rejects_non_positive_executable_bid() {
+        let fee_model = ArbFeeModel::new(1);
+        let quotes = make_quotes(&[(0, 10), (60, 65)]);
+        assert!(
+            fee_model.net_sell_set_revenue(&quotes, 1).is_none(),
+            "Any non-positive effective bid should invalidate sell-set revenue",
+        );
     }
 
     #[test]

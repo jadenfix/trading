@@ -7,7 +7,6 @@
 use std::collections::HashMap;
 
 use common::{EventInfo, MarketInfo};
-use serde::Deserialize;
 use tracing::{debug, info, warn};
 
 use kalshi_client::KalshiRestClient;
@@ -51,7 +50,6 @@ pub enum EdgeCase {
 
 // Used from common::EventInfo and common::EventsResponse
 
-
 // ── Universe Builder ──────────────────────────────────────────────────
 
 /// Discovers events and builds candidate arb groups.
@@ -75,26 +73,20 @@ impl UniverseBuilder {
         let mut groups = Vec::new();
 
         for event in events {
-            // Skip events with fewer than 2 markets (no arb possible).
-            if event.markets.len() < 2 {
-                debug!(
-                    "Skipping event {} ({} markets): need ≥ 2",
-                    event.event_ticker,
-                    event.markets.len()
-                );
-                continue;
-            }
-
             // Only consider open markets.
             let open_markets: Vec<MarketInfo> = event
                 .markets
-                .into_iter()
-                .filter(|m| m.status == "open")
+                .iter()
+                .filter(|m| m.status == "active" || m.status == "open")
+                .cloned()
                 .collect();
 
-            if open_markets.len() < 2 {
+            if open_markets.is_empty() {
                 continue;
             }
+
+            // A single binary market is a valid arb group (YES vs NO).
+            // Multiple markets in an event (categorical) are also valid.
 
             // Classify exhaustiveness.
             let (is_exhaustive, edge_case) =
@@ -106,14 +98,14 @@ impl UniverseBuilder {
                 .map(|m| (m.ticker.clone(), m))
                 .collect();
 
-            debug!(
-                "ArbGroup: {} — {} outcomes, ME={}, exhaustive={}, edge={:?}",
-                event.event_ticker,
-                tickers.len(),
-                event.mutually_exclusive,
-                is_exhaustive,
-                edge_case
-            );
+            // debug!(
+            //     "ArbGroup: {} — {} outcomes, ME={}, exhaustive={}, edge={:?}",
+            //     event.event_ticker,
+            //     tickers.len(),
+            //     event.mutually_exclusive,
+            //     is_exhaustive,
+            //     edge_case
+            // );
 
             groups.push(ArbGroup {
                 event_ticker: event.event_ticker,
@@ -141,8 +133,9 @@ impl UniverseBuilder {
         let mut cursor: Option<String> = None;
 
         loop {
-            let (events, next_cursor) =
-                client.get_events(Some("open"), true, Some(200), cursor.as_deref()).await?;
+            let (events, next_cursor) = client
+                .get_events(Some("open"), true, Some(200), cursor.as_deref())
+                .await?;
 
             let count = events.len();
             all_events.extend(events);
@@ -163,6 +156,13 @@ impl UniverseBuilder {
         mutually_exclusive: &bool,
         markets: &[MarketInfo],
     ) -> (bool, Option<EdgeCase>) {
+        // Special case: Single market is self-contained (YES/NO arb).
+        // It is always "mutually exclusive" in the sense that you can't have both terminate YES (unless void).
+        // It is "exhaustive" because YES and NO cover all non-void outcomes.
+        if markets.len() == 1 {
+            return (true, None);
+        }
+
         if !mutually_exclusive {
             return (false, Some(EdgeCase::PartialSet));
         }
@@ -172,17 +172,19 @@ impl UniverseBuilder {
         let mut tie_mentioned = false;
 
         for market in markets {
+            let title_lower = market.title.to_lowercase();
+            if title_lower.contains("tie") || title_lower.contains("draw") {
+                has_tie_market = true;
+            }
+
             let rules = format!(
                 "{} {} {}",
-                market.title.to_lowercase(),
+                title_lower,
                 market.rules_primary.to_lowercase(),
                 market.rules_secondary.to_lowercase(),
             );
 
-            if rules.contains("tie") || rules.contains("draw") {
-                has_tie_market = true;
-            }
-
+            // Void check still uses everything
             if rules.contains("void") || rules.contains("cancel") {
                 return (false, Some(EdgeCase::VoidPossible));
             }

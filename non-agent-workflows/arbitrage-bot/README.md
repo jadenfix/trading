@@ -19,14 +19,21 @@ A high-performance arbitrage bot for Kalshi prediction markets.
 
 1. **Configure**:
    - Copy `config.toml` and adjust thresholds (min profit, slippage buffer, etc.).
+   - Keep `arb.guaranteed_arb_only = true` for only mathematically guaranteed set arbs.
    - Set environment variables `KALSHI_API_KEY` and `KALSHI_SECRET_KEY`.
+   - If logs show frequent `no quote data` / `stale quotes`, increase `timing.quote_stale_secs`.
+   - Optional endpoint overrides for network/DNS issues:
+     - `KALSHI_API_BASE_URL` (REST base URL, e.g. `https://api.elections.kalshi.com`)
+     - `KALSHI_WS_URL` (WS URL, e.g. `wss://api.elections.kalshi.com/trade-api/ws/v2`)
+   - Optional WS auth toggle for public ticker feed debugging:
+     - `KALSHI_WS_DISABLE_AUTH=1` (skips WS auth headers)
 
 2. **Run**:
    ```bash
    # Dry run (no orders submitted)
    cargo run --release -- --dry-run
    
-   # Live trading (DEMO environment by default)
+   # Live trading (environment from config.toml / USE_DEMO)
    cargo run --release
 
    # Check authentication only

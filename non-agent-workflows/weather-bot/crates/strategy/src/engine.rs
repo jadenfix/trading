@@ -334,7 +334,7 @@ mod tests {
             expiration_time: Some(Utc::now() + chrono::Duration::hours(24)),
             result: None,
             strike_type: Some("greater".into()),
-            floor_strike: Some(50),
+            floor_strike: Some(50.0),
             cap_strike: None,
             functional_strike: None,
             tick_size: Some(1),

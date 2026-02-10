@@ -40,7 +40,9 @@ pub struct ArbBotConfig {
     pub execution: ExecutionConfig,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 impl Default for ArbBotConfig {
     fn default() -> Self {

@@ -38,9 +38,9 @@ impl ArbRiskManager {
             .attempt_history
             .entry(opp.group_event_ticker.clone())
             .or_default();
-        
+
         // Prune old attempts (> 60s).
-        while history.front().map_or(false, |t| t.elapsed().as_secs() > 60) {
+        while history.front().is_some_and(|t| t.elapsed().as_secs() > 60) {
             history.pop_front();
         }
 
@@ -54,49 +54,52 @@ impl ArbRiskManager {
             .event_exposure
             .get(&opp.group_event_ticker)
             .unwrap_or(&0);
-        
+
         // Conservative exposure add: for arb, we are hedged, but gross exposure matters
         // for "what if one leg fails".
-        // Gross exposure of the trade = qty * payout (100) per leg? 
+        // Gross exposure of the trade = qty * payout (100) per leg?
         // Or just the max liability.
         // For Buy-Set, max liability is Cost.
         // For Sell-Set, max liability is Payout * derived_qty - Premium.
         // Let's use `payout * qty` as a conservative proxy for specific-event risk.
-        let trade_risk = 100 * opp.qty; 
+        let trade_risk = 100 * opp.qty;
 
         if current_event_exposure + trade_risk > self.config.max_exposure_per_event_cents {
-             return Err(Error::RiskViolation(format!(
-                 "Event exposure limit: {} + {} > {}", 
-                 current_event_exposure, trade_risk, self.config.max_exposure_per_event_cents
-             )));
+            return Err(Error::RiskViolation(format!(
+                "Event exposure limit: {} + {} > {}",
+                current_event_exposure, trade_risk, self.config.max_exposure_per_event_cents
+            )));
         }
 
         // 3. Check Total Exposure.
         if self.total_exposure + trade_risk > self.config.max_total_exposure_cents {
-             return Err(Error::RiskViolation(format!(
-                 "Total exposure limit: {} + {} > {}", 
-                 self.total_exposure, trade_risk, self.config.max_total_exposure_cents
-             )));
+            return Err(Error::RiskViolation(format!(
+                "Total exposure limit: {} + {} > {}",
+                self.total_exposure, trade_risk, self.config.max_total_exposure_cents
+            )));
         }
 
         // Approved. Record the attempt.
         history.push_back(now);
-        
+
         Ok(())
     }
 
     /// Record a successful execution to update exposure tracking.
     pub fn record_execution(&mut self, opp: &ArbOpportunity) {
         let trade_risk = 100 * opp.qty;
-        *self.event_exposure.entry(opp.group_event_ticker.clone()).or_default() += trade_risk;
+        *self
+            .event_exposure
+            .entry(opp.group_event_ticker.clone())
+            .or_default() += trade_risk;
         self.total_exposure += trade_risk;
-        
+
         info!(
             "Risk updated: event_exposure={} total={}",
             self.event_exposure[&opp.group_event_ticker], self.total_exposure
         );
     }
-    
+
     /// Reset exposure tracking (e.g. after position reconciliation).
     pub fn reset_exposure(&mut self) {
         self.event_exposure.clear();

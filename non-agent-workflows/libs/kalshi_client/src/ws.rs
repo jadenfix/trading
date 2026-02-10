@@ -69,6 +69,38 @@ fn env_truthy(name: &str) -> bool {
     }
 }
 
+fn merge_price_entry(
+    prev: Option<&PriceEntry>,
+    ticker: &WsTickerMessage,
+    now: Instant,
+) -> PriceEntry {
+    let yes_bid = ticker.yes_bid.or(prev.map(|p| p.yes_bid)).unwrap_or(0);
+    let yes_ask = ticker.yes_ask.or(prev.map(|p| p.yes_ask)).unwrap_or(0);
+    let last_price = ticker
+        .last_price
+        .or(prev.map(|p| p.last_price))
+        .unwrap_or(0);
+    let volume = ticker.volume.or(prev.map(|p| p.volume)).unwrap_or(0);
+
+    // Some ticker messages contain non-price fields only. In that case we keep the
+    // prior price timestamp so stale quotes do not appear fresh.
+    let has_price_update =
+        ticker.yes_bid.is_some() || ticker.yes_ask.is_some() || ticker.last_price.is_some();
+    let updated_at = if has_price_update {
+        now
+    } else {
+        prev.map(|p| p.updated_at).unwrap_or(now)
+    };
+
+    PriceEntry {
+        yes_bid,
+        yes_ask,
+        last_price,
+        volume,
+        updated_at,
+    }
+}
+
 /// A cached price entry updated by the WebSocket feed.
 #[derive(Debug, Clone)]
 pub struct PriceEntry {
@@ -325,19 +357,15 @@ Check USE_DEMO and API key/secret pairing."
                         Ok(ticker) => {
                             if !ticker.market_ticker.is_empty() {
                                 let mut cache = self.price_cache.write().await;
-                                cache.insert(
-                                    ticker.market_ticker.clone(),
-                                    PriceEntry {
-                                        yes_bid: ticker.yes_bid,
-                                        yes_ask: ticker.yes_ask,
-                                        last_price: ticker.last_price,
-                                        volume: ticker.volume,
-                                        updated_at: Instant::now(),
-                                    },
-                                );
+                                let prev = cache.get(&ticker.market_ticker).cloned();
+                                let merged =
+                                    merge_price_entry(prev.as_ref(), &ticker, Instant::now());
+                                let yes_bid = merged.yes_bid;
+                                let yes_ask = merged.yes_ask;
+                                cache.insert(ticker.market_ticker.clone(), merged);
                                 debug!(
                                     "Ticker: {} — bid={}¢ ask={}¢",
-                                    ticker.market_ticker, ticker.yes_bid, ticker.yes_ask,
+                                    ticker.market_ticker, yes_bid, yes_ask,
                                 );
                             }
                         }

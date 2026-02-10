@@ -65,6 +65,7 @@ impl<'a> ArbEvaluator<'a> {
         min_profit: i64,
         ev_mode: bool,
         guaranteed_only: bool,
+        strict_binary_only: bool,
         tie_buffer: i64,
         max_age_secs: u64,
         qty: i64,
@@ -90,6 +91,15 @@ impl<'a> ArbEvaluator<'a> {
             return None;
         }
 
+        if strict_binary_only && market_quotes.len() > 2 {
+            debug!(
+                "{}: strict-binary mode skipping {}-leg set",
+                group.event_ticker,
+                market_quotes.len()
+            );
+            return None;
+        }
+
         // 3. Liquidity check (top-of-book size).
         // For simplicity, we just check if top-of-book volume >= qty.
         // A real production bot uses orderbook snapshots for depth.
@@ -107,11 +117,30 @@ impl<'a> ArbEvaluator<'a> {
             // Cost of Buying NO = 100 - YES Bid.
             let quote = &market_quotes[0];
 
-            let no_ask = 100 - quote.yes_bid;
+            if quote.yes_ask <= 0 || quote.yes_ask >= 100 {
+                debug!(
+                    "{}: single-market arb invalid quote (yes_ask={})",
+                    group.event_ticker, quote.yes_ask
+                );
+                return None;
+            }
 
-            let yes_cost =
-                self.fees.schedule.taker_fee_cents(qty, quote.yes_ask) + (quote.yes_ask * qty);
-            let no_cost = self.fees.schedule.taker_fee_cents(qty, no_ask) + (no_ask * qty);
+            let no_ask = 100 - quote.yes_bid;
+            let yes_effective_ask = quote.yes_ask + self.fees.slippage_buffer;
+            let no_effective_ask = no_ask + self.fees.slippage_buffer;
+
+            if !(1..=99).contains(&yes_effective_ask) || !(1..=99).contains(&no_effective_ask) {
+                debug!(
+                    "{}: single-market arb invalid after slippage (yes={} no={})",
+                    group.event_ticker, yes_effective_ask, no_effective_ask
+                );
+                return None;
+            }
+
+            let yes_cost = self.fees.schedule.taker_fee_cents(qty, yes_effective_ask)
+                + (yes_effective_ask * qty);
+            let no_cost = self.fees.schedule.taker_fee_cents(qty, no_effective_ask)
+                + (no_effective_ask * qty);
             let total_cost = yes_cost + no_cost;
 
             // Payout for YES+NO is always $1.00 (100 cents) per unit, if strictly binary.
@@ -139,10 +168,10 @@ impl<'a> ArbEvaluator<'a> {
                         }, // Buy NO
                     ],
                     reason: format!(
-                        "SINGLE-MKT ARB: Yes({}¢)+No({}¢)+Fees({}¢) < 100¢; net={}",
-                        quote.yes_ask,
-                        no_ask,
-                        (yes_cost + no_cost - (quote.yes_ask + no_ask) * qty) / qty,
+                        "SINGLE-MKT ARB: Yes({}¢)+No({}¢)+Fees({}¢) < 100¢; net={}¢",
+                        yes_effective_ask,
+                        no_effective_ask,
+                        (yes_cost + no_cost - (yes_effective_ask + no_effective_ask) * qty) / qty,
                         net_profit
                     ),
                 });
@@ -179,6 +208,19 @@ impl<'a> ArbEvaluator<'a> {
         };
 
         // 5. Check Buy-Set Arb (Buy all YES).
+        // Require a valid positive ask on every leg; ask=0 usually means
+        // no resting liquidity and should not be treated as executable.
+        if market_quotes
+            .iter()
+            .any(|q| q.yes_ask <= 0 || q.yes_ask >= 100)
+        {
+            debug!(
+                "{}: buy-set invalid; non-executable ask present",
+                group.event_ticker
+            );
+            return None;
+        }
+
         let buy_cost = self.fees.net_buy_set_cost(&market_quotes, qty);
         // Revenue is fixed payout * qty.
         let buy_revenue = payout * qty;

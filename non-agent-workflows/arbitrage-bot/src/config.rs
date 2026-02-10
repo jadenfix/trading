@@ -58,6 +58,84 @@ impl Default for ArbBotConfig {
     }
 }
 
+fn validate_config(config: &ArbBotConfig) -> Result<(), Error> {
+    let mut issues: Vec<String> = Vec::new();
+
+    if config.arb.default_qty <= 0 {
+        issues.push("arb.default_qty must be > 0".into());
+    }
+    if config.arb.min_profit_cents < 0 {
+        issues.push("arb.min_profit_cents must be >= 0".into());
+    }
+    if config.arb.slippage_buffer_cents < 0 {
+        issues.push("arb.slippage_buffer_cents must be >= 0".into());
+    }
+    if config.arb.tie_buffer_cents < 0 {
+        issues.push("arb.tie_buffer_cents must be >= 0".into());
+    }
+    if config.arb.min_leg_size <= 0 {
+        issues.push("arb.min_leg_size must be > 0".into());
+    }
+
+    if config.timing.eval_interval_ms == 0 {
+        issues.push("timing.eval_interval_ms must be > 0".into());
+    }
+    if config.timing.universe_refresh_secs == 0 {
+        issues.push("timing.universe_refresh_secs must be > 0".into());
+    }
+    if config.timing.quote_stale_secs == 0 {
+        issues.push("timing.quote_stale_secs must be > 0".into());
+    }
+
+    if config.risk.max_exposure_per_event_cents <= 0 {
+        issues.push("risk.max_exposure_per_event_cents must be > 0".into());
+    }
+    if config.risk.max_total_exposure_cents <= 0 {
+        issues.push("risk.max_total_exposure_cents must be > 0".into());
+    }
+    if config.risk.max_total_exposure_cents < config.risk.max_exposure_per_event_cents {
+        issues.push(
+            "risk.max_total_exposure_cents must be >= risk.max_exposure_per_event_cents".into(),
+        );
+    }
+    if config.risk.max_attempts_per_group_per_min == 0 {
+        issues.push("risk.max_attempts_per_group_per_min must be > 0".into());
+    }
+    if config.risk.max_orders_per_minute == 0 {
+        issues.push("risk.max_orders_per_minute must be > 0".into());
+    }
+    if config.risk.kill_switch_disconnect_count == 0 {
+        issues.push("risk.kill_switch_disconnect_count must be > 0".into());
+    }
+    if config.risk.min_balance_cents < 0 {
+        issues.push("risk.min_balance_cents must be >= 0".into());
+    }
+    if config.risk.max_daily_loss_cents <= 0 {
+        issues.push("risk.max_daily_loss_cents must be > 0".into());
+    }
+    if config.risk.max_unwind_loss_cents < 0 {
+        issues.push("risk.max_unwind_loss_cents must be >= 0".into());
+    }
+
+    let tif = config.execution.time_in_force.trim().to_ascii_lowercase();
+    if tif != "fok" {
+        issues.push("execution.time_in_force must be 'fok' (gtc is unsupported)".into());
+    }
+    let unwind = config.execution.unwind_policy.trim().to_ascii_lowercase();
+    if unwind != "cross_spread" && unwind != "cancel_only" {
+        issues.push("execution.unwind_policy must be 'cross_spread' or 'cancel_only'".into());
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Config(format!(
+            "Invalid config:\n - {}",
+            issues.join("\n - ")
+        )))
+    }
+}
+
 // ── Config loader ─────────────────────────────────────────────────────
 
 /// Load bot configuration from environment and optional config file.
@@ -101,6 +179,8 @@ pub fn load_config() -> Result<ArbBotConfig, Error> {
             "KALSHI_SECRET_KEY is required (set in .env or environment)".into(),
         ));
     }
+
+    validate_config(&config)?;
 
     Ok(config)
 }

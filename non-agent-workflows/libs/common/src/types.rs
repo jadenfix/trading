@@ -21,7 +21,10 @@ mod flexible_i64 {
                 } else if let Some(f) = n.as_f64() {
                     Ok(f.round() as i64)
                 } else {
-                    Err(serde::de::Error::custom(format!("Number out of range: {}", n)))
+                    Err(serde::de::Error::custom(format!(
+                        "Number out of range: {}",
+                        n
+                    )))
                 }
             }
             Value::String(s) => {
@@ -30,10 +33,16 @@ mod flexible_i64 {
                 } else if let Ok(f) = s.parse::<f64>() {
                     Ok(f.round() as i64)
                 } else {
-                    Err(serde::de::Error::custom(format!("Invalid string for i64: {}", s)))
+                    Err(serde::de::Error::custom(format!(
+                        "Invalid string for i64: {}",
+                        s
+                    )))
                 }
             }
-            _ => Err(serde::de::Error::custom(format!("Expected number or string, got {:?}", v))),
+            _ => Err(serde::de::Error::custom(format!(
+                "Expected number or string, got {:?}",
+                v
+            ))),
         }
     }
 }
@@ -71,7 +80,6 @@ mod flexible_option_i64 {
         }
     }
 }
-
 
 /// A Kalshi market as returned by GET /trade-api/v2/markets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -372,14 +380,14 @@ pub struct WsSubscribeParams {
 pub struct WsTickerMessage {
     #[serde(default)]
     pub market_ticker: String,
-    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
-    pub yes_bid: i64,
-    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
-    pub yes_ask: i64,
-    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
-    pub last_price: i64,
-    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
-    pub volume: i64,
+    #[serde(default, deserialize_with = "flexible_option_i64::deserialize")]
+    pub yes_bid: Option<i64>,
+    #[serde(default, deserialize_with = "flexible_option_i64::deserialize")]
+    pub yes_ask: Option<i64>,
+    #[serde(default, deserialize_with = "flexible_option_i64::deserialize")]
+    pub last_price: Option<i64>,
+    #[serde(default, deserialize_with = "flexible_option_i64::deserialize")]
+    pub volume: Option<i64>,
 }
 
 /// Generic WebSocket message envelope.
@@ -468,8 +476,6 @@ pub struct EventsResponse {
     pub events: Vec<EventInfo>,
     pub cursor: Option<String>,
 }
-
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchOrderRequest {

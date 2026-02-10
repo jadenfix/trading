@@ -1,0 +1,4 @@
+package:
+  - 'non-agent-workflows'
+  - 'clawdbot-workflows'
+  - 'llm-workflows'

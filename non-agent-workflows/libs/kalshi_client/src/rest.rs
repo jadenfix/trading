@@ -55,6 +55,16 @@ fn format_reqwest_error(err: &reqwest::Error) -> String {
     message
 }
 
+fn summarize_response_body(raw: &str) -> String {
+    const MAX_CHARS: usize = 800;
+    let compact = raw.replace('\n', " ").replace('\r', " ");
+    if compact.len() > MAX_CHARS {
+        format!("{}…", &compact[..MAX_CHARS])
+    } else {
+        compact
+    }
+}
+
 /// Async REST client for Kalshi trade API.
 #[derive(Debug, Clone)]
 pub struct KalshiRestClient {
@@ -352,10 +362,14 @@ impl KalshiRestClient {
             });
         }
 
-        let order_resp: CreateOrderResponse = resp
-            .json()
-            .await
-            .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
+        let raw_body = resp.text().await.unwrap_or_default();
+        let order_resp: CreateOrderResponse = serde_json::from_str(&raw_body).map_err(|e| {
+            Error::Http(format!(
+                "Error decoding create_order response: {}; body={}",
+                e,
+                summarize_response_body(&raw_body)
+            ))
+        })?;
 
         debug!(
             "Order placed: id={} status={} fill={}",
@@ -470,10 +484,14 @@ impl KalshiRestClient {
             });
         }
 
-        let wrapper: common::BatchOrderResponse = resp
-            .json()
-            .await
-            .map_err(|e| Error::Http(format_reqwest_error(&e)))?;
+        let raw_body = resp.text().await.unwrap_or_default();
+        let wrapper: common::BatchOrderResponse = serde_json::from_str(&raw_body).map_err(|e| {
+            Error::Http(format!(
+                "Error decoding batch order response: {}; body={}",
+                e,
+                summarize_response_body(&raw_body)
+            ))
+        })?;
         Ok(wrapper)
     }
 }

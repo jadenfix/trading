@@ -3,15 +3,17 @@
 # KALSHI_API_KEY and KALSHI_SECRET_KEY must be set in .env or environment.
 
 # Use demo environment (set to false for production)
-use_demo = true
+use_demo = false
 
 [arb]
 # Minimum net profit in cents to trigger a trade
-min_profit_cents = 3
+min_profit_cents = 1
 # Slippage buffer in cents per leg (added to ask / subtracted from bid)
 slippage_buffer_cents = 1
 # Enable EV-mode for non-exhaustive sets
 ev_mode_enabled = true
+# If true, only trade guaranteed exhaustive arbs (no EV heuristics)
+guaranteed_arb_only = true
 # Extra buffer in cents required for EV-mode trades (on top of min_profit)
 tie_buffer_cents = 5
 # Minimum top-of-book size per leg to consider tradeable
@@ -25,7 +27,7 @@ universe_refresh_secs = 900
 # Arb evaluation interval in milliseconds
 eval_interval_ms = 1000
 # Max age for quote data before considered stale (seconds)
-quote_stale_secs = 2
+quote_stale_secs = 120
 # Price data staleness for general use (seconds)
 price_stale_secs = 300
 

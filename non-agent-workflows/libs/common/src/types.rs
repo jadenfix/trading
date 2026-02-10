@@ -5,6 +5,74 @@ use serde::{Deserialize, Serialize};
 
 // ── Kalshi Market Types ───────────────────────────────────────────────
 
+mod flexible_i64 {
+    use serde::{self, Deserialize, Deserializer};
+    use serde_json::Value;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<i64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let v = Value::deserialize(deserializer)?;
+        match v {
+            Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Ok(i)
+                } else if let Some(f) = n.as_f64() {
+                    Ok(f.round() as i64)
+                } else {
+                    Err(serde::de::Error::custom(format!("Number out of range: {}", n)))
+                }
+            }
+            Value::String(s) => {
+                if let Ok(i) = s.parse::<i64>() {
+                    Ok(i)
+                } else if let Ok(f) = s.parse::<f64>() {
+                    Ok(f.round() as i64)
+                } else {
+                    Err(serde::de::Error::custom(format!("Invalid string for i64: {}", s)))
+                }
+            }
+            _ => Err(serde::de::Error::custom(format!("Expected number or string, got {:?}", v))),
+        }
+    }
+}
+
+mod flexible_option_i64 {
+    use serde::{self, Deserialize, Deserializer};
+    use serde_json::Value;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let v = Option::<Value>::deserialize(deserializer)?;
+        match v {
+            Some(Value::Number(n)) => {
+                if let Some(i) = n.as_i64() {
+                    Ok(Some(i))
+                } else if let Some(f) = n.as_f64() {
+                    Ok(Some(f.round() as i64))
+                } else {
+                    Ok(None)
+                }
+            }
+            Some(Value::String(s)) => {
+                if let Ok(i) = s.parse::<i64>() {
+                    Ok(Some(i))
+                } else if let Ok(f) = s.parse::<f64>() {
+                    Ok(Some(f.round() as i64))
+                } else {
+                    Ok(None)
+                }
+            }
+            Some(Value::Null) | None => Ok(None),
+            _ => Ok(None),
+        }
+    }
+}
+
+
 /// A Kalshi market as returned by GET /trade-api/v2/markets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketInfo {
@@ -18,21 +86,21 @@ pub struct MarketInfo {
     pub subtitle: String,
     #[serde(default)]
     pub status: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub yes_bid: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub yes_ask: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub no_bid: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub no_ask: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub last_price: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub volume: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub volume_24h: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub open_interest: i64,
     #[serde(default)]
     pub rules_primary: String,
@@ -47,12 +115,12 @@ pub struct MarketInfo {
     #[serde(default)]
     pub strike_type: Option<String>,
     #[serde(default)]
-    pub floor_strike: Option<i64>,
+    pub floor_strike: Option<f64>,
     #[serde(default)]
-    pub cap_strike: Option<i64>,
+    pub cap_strike: Option<f64>,
     #[serde(default)]
     pub functional_strike: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_option_i64::deserialize")]
     pub tick_size: Option<i64>,
     #[serde(default)]
     pub response_price_units: Option<String>,
@@ -189,19 +257,19 @@ pub struct OrderInfo {
     #[serde(rename = "type")]
     pub order_type: OrderType,
     pub status: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub yes_price: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub no_price: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub fill_count: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub remaining_count: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub initial_count: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub taker_fees: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub maker_fees: i64,
 }
 
@@ -233,16 +301,16 @@ pub enum OrderType {
 pub struct Position {
     pub ticker: String,
     /// Number of YES contracts held (negative = short).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub yes_count: i64,
     /// Number of NO contracts held.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub no_count: i64,
     /// Total cost basis in cents.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub market_exposure: i64,
     /// Realized PnL in cents.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub realized_pnl: i64,
 }
 
@@ -259,6 +327,7 @@ pub struct PositionsResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct BalanceResponse {
     /// Balance in cents.
+    #[serde(deserialize_with = "flexible_i64::deserialize")]
     pub balance: i64,
 }
 
@@ -303,13 +372,13 @@ pub struct WsSubscribeParams {
 pub struct WsTickerMessage {
     #[serde(default)]
     pub market_ticker: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub yes_bid: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub yes_ask: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub last_price: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub volume: i64,
 }
 
@@ -382,10 +451,15 @@ mod tests {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventInfo {
     pub event_ticker: String,
+    #[serde(default)]
     pub title: String,
+    #[serde(default)]
     pub mutually_exclusive: bool,
+    #[serde(default)]
     pub markets: Vec<MarketInfo>,
+    #[serde(default)]
     pub category: String,
+    #[serde(default)]
     pub sub_title: String,
 }
 

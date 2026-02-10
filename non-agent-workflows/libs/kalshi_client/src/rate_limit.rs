@@ -9,8 +9,20 @@ use std::sync::Arc;
 /// Dual rate limiter — separate buckets for reads and writes.
 #[derive(Debug, Clone)]
 pub struct RateLimiter {
-    read_limiter: Arc<GovLimiter<governor::state::NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>>,
-    write_limiter: Arc<GovLimiter<governor::state::NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>>,
+    read_limiter: Arc<
+        GovLimiter<
+            governor::state::NotKeyed,
+            governor::state::InMemoryState,
+            governor::clock::DefaultClock,
+        >,
+    >,
+    write_limiter: Arc<
+        GovLimiter<
+            governor::state::NotKeyed,
+            governor::state::InMemoryState,
+            governor::clock::DefaultClock,
+        >,
+    >,
 }
 
 impl RateLimiter {

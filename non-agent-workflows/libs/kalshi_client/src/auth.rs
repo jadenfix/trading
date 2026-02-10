@@ -108,10 +108,10 @@ mod tests {
     #[test]
     fn test_sign_request_format() {
         // Generate a small test key (not for production — just structure test).
-        let private_key =
-            RsaPrivateKey::new(&mut rand::thread_rng(), 2048).expect("keygen failed");
-        let pem = rsa::pkcs1::EncodeRsaPrivateKey::to_pkcs1_pem(&private_key, rsa::pkcs1::LineEnding::LF)
-            .expect("pem encode failed");
+        let private_key = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).expect("keygen failed");
+        let pem =
+            rsa::pkcs1::EncodeRsaPrivateKey::to_pkcs1_pem(&private_key, rsa::pkcs1::LineEnding::LF)
+                .expect("pem encode failed");
 
         let auth = KalshiAuth::new("test-key-id", pem.as_ref()).expect("auth init failed");
 
@@ -132,10 +132,10 @@ mod tests {
     /// Verify query parameters are stripped before signing.
     #[test]
     fn test_sign_strips_query_params() {
-        let private_key =
-            RsaPrivateKey::new(&mut rand::thread_rng(), 2048).expect("keygen failed");
-        let pem = rsa::pkcs1::EncodeRsaPrivateKey::to_pkcs1_pem(&private_key, rsa::pkcs1::LineEnding::LF)
-            .expect("pem encode failed");
+        let private_key = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).expect("keygen failed");
+        let pem =
+            rsa::pkcs1::EncodeRsaPrivateKey::to_pkcs1_pem(&private_key, rsa::pkcs1::LineEnding::LF)
+                .expect("pem encode failed");
 
         let auth = KalshiAuth::new("test-key-id", pem.as_ref()).expect("auth init failed");
 
@@ -145,8 +145,12 @@ mod tests {
 
         // Signatures differ due to different timestamps and randomness,
         // but both should decode to 256-byte values.
-        let d1 = base64::engine::general_purpose::STANDARD.decode(&sig1).unwrap();
-        let d2 = base64::engine::general_purpose::STANDARD.decode(&sig2).unwrap();
+        let d1 = base64::engine::general_purpose::STANDARD
+            .decode(&sig1)
+            .unwrap();
+        let d2 = base64::engine::general_purpose::STANDARD
+            .decode(&sig2)
+            .unwrap();
         assert_eq!(d1.len(), 256);
         assert_eq!(d2.len(), 256);
     }

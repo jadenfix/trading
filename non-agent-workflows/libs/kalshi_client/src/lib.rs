@@ -10,4 +10,4 @@ pub mod ws;
 pub use auth::KalshiAuth;
 pub use rate_limit::RateLimiter;
 pub use rest::KalshiRestClient;
-pub use ws::{KalshiWsClient, PriceCache, PriceEntry, new_price_cache};
+pub use ws::{new_price_cache, KalshiWsClient, PriceCache, PriceEntry};

@@ -12,7 +12,7 @@ use common::config::BotConfig;
 use common::{Action, MarketInfo, OrderIntent, Side};
 use kalshi_client::PriceEntry;
 use noaa_client::probability::compute_p_yes;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::cache::{ForecastCache, ForecastEntry};
 

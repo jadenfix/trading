@@ -1,0 +1,15 @@
+[package]
+name = "strategy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common = { path = "../common" }
+noaa_client = { path = "../noaa_client" }
+kalshi_client = { path = "../kalshi_client" }
+
+dashmap = "6"
+tokio = { version = "1", features = ["sync", "time"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"

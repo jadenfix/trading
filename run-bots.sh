@@ -126,9 +126,9 @@ trap cleanup INT TERM EXIT
 (
   cd "$ARB_DIR"
   if [[ -n "$ARB_FLAG" ]]; then
-    cargo run --release -- "$ARB_FLAG"
+    exec cargo run --release -- "$ARB_FLAG"
   else
-    cargo run --release
+    exec cargo run --release
   fi
 ) &
 ARB_PID=$!
@@ -136,9 +136,9 @@ ARB_PID=$!
 (
   cd "$WEATHER_DIR"
   if [[ -n "$WEATHER_FLAG" ]]; then
-    cargo run --release -- "$WEATHER_FLAG"
+    exec cargo run --release -- "$WEATHER_FLAG"
   else
-    cargo run --release
+    exec cargo run --release
   fi
 ) &
 WEATHER_PID=$!

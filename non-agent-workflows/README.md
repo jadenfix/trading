@@ -35,3 +35,10 @@ This repository contains algorithmic trading bots for the Kalshi prediction mark
    - Each bot is a separate Cargo workspace.
    - `cd weather-bot && cargo build --release`
    - `cd arbitrage-bot && cargo build --release`
+
+## Trade Logs
+
+- Runtime trade/audit logs are written under repo root `TRADES/`:
+  - `TRADES/arbitrage-bot/trades-YYYY-MM-DD.jsonl`
+  - `TRADES/weather-bot/trades-YYYY-MM-DD.jsonl`
+- Override root with `TRADES_DIR=/custom/root` (each bot still writes to its own subfolder).

@@ -41,6 +41,7 @@ struct Cli {
 }
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const BOT_TRADE_DIR: &str = "arbitrage-bot";
 
 fn opportunity_fingerprint(opp: &ArbOpportunity) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -82,15 +83,15 @@ fn resolve_trades_dir() -> PathBuf {
     if let Ok(raw) = std::env::var("TRADES_DIR") {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
+            return PathBuf::from(trimmed).join(BOT_TRADE_DIR);
         }
     }
 
     if let Some(root) = resolve_repo_root() {
-        return root.join("TRADES");
+        return root.join("TRADES").join(BOT_TRADE_DIR);
     }
 
-    PathBuf::from("TRADES")
+    PathBuf::from("TRADES").join(BOT_TRADE_DIR)
 }
 
 fn direction_label(direction: ArbDirection) -> &'static str {

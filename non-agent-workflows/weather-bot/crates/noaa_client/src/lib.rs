@@ -205,9 +205,7 @@ impl NoaaClient {
             // Parse temperature (handles both int and QuantitativeValue).
             let temp = match &period.temperature {
                 serde_json::Value::Number(n) => n.as_f64(),
-                serde_json::Value::Object(obj) => {
-                    obj.get("value").and_then(|v| v.as_f64())
-                }
+                serde_json::Value::Object(obj) => obj.get("value").and_then(|v| v.as_f64()),
                 _ => None,
             };
 
@@ -245,12 +243,17 @@ impl NoaaClient {
 
         // Estimate temperature uncertainty from hourly spread.
         let mean_temp = temps.iter().sum::<f64>() / temps.len() as f64;
-        let variance = temps.iter().map(|t| (t - mean_temp).powi(2)).sum::<f64>() / temps.len() as f64;
+        let variance =
+            temps.iter().map(|t| (t - mean_temp).powi(2)).sum::<f64>() / temps.len() as f64;
         let std_dev = variance.sqrt().max(2.0); // Minimum 2°F uncertainty.
 
         debug!(
             "{}: high={:.1}°F low={:.1}°F precip={:.0}% uncertainty=±{:.1}°F",
-            city.name, high, low, avg_precip * 100.0, std_dev
+            city.name,
+            high,
+            low,
+            avg_precip * 100.0,
+            std_dev
         );
 
         Ok(ForecastData {

@@ -31,6 +31,14 @@ discovery_interval_secs = 1800  # Market discovery refresh
 price_stale_secs = 300          # Price data staleness (5 min)
 forecast_stale_secs = 3600      # Forecast staleness (1 hour)
 
+[risk]
+max_position_cents = 500        # $5 max per market
+max_total_exposure_cents = 5000 # $50 total portfolio max
+max_city_exposure_cents = 1500  # $15 per city (correlated markets)
+max_daily_loss_cents = 2000     # $20 drawdown circuit-breaker
+max_orders_per_minute = 10      # Order throttle
+min_balance_cents = 100         # Keep at least $1
+
 # Cities are configured with pre-resolved NWS gridpoint coordinates.
 # Modify if targeting additional cities.
 

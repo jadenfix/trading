@@ -68,8 +68,16 @@ async fn main() {
         cfg.strategy.entry_threshold_cents,
         cfg.strategy.exit_threshold_cents,
         cfg.strategy.edge_threshold_cents,
-        cfg.strategy.max_position_cents,
+        cfg.risk.max_position_cents,
     );
+    info!(
+        "Risk: max_city={}¢, max_total={}¢, max_daily_loss={}¢, orders/min={}",
+        cfg.risk.max_city_exposure_cents,
+        cfg.risk.max_total_exposure_cents,
+        cfg.risk.max_daily_loss_cents,
+        cfg.risk.max_orders_per_minute,
+    );
+    info!("Fees: taker={:.2}%, maker={:.4}%", 0.07 * 100.0, 0.0175 * 100.0);
 
     // Initialize auth.
     let auth = match KalshiAuth::new(&cfg.api_key, &cfg.secret_key) {
@@ -106,7 +114,7 @@ async fn main() {
 
     let noaa = NoaaClient::new();
     let strategy = StrategyEngine::new(cfg.clone());
-    let _risk_mgr = RiskManager::new(cfg.strategy.max_position_cents);
+    let _risk_mgr = RiskManager::new(cfg.risk.clone());
 
     // ── Dry-run mode ─────────────────────────────────────────────────
     if cli.dry_run {
@@ -124,7 +132,17 @@ async fn main() {
         let intents = strategy.evaluate(&markets, &prices, &forecast_cache, &positions);
         info!("Strategy produced {} intents (dry-run, not executing)", intents.len());
         for intent in &intents {
-            info!("  → {:?}", intent);
+            info!(
+                "  → {} {} {} @ {}¢ x{} (fee≈{}¢, conf={:.2}) — {}",
+                match intent.action { common::Action::Buy => "BUY", common::Action::Sell => "SELL" },
+                match intent.side { common::Side::Yes => "YES", common::Side::No => "NO" },
+                intent.ticker,
+                intent.price_cents,
+                intent.count,
+                intent.estimated_fee_cents,
+                intent.confidence,
+                intent.reason,
+            );
         }
         return;
     }
@@ -173,13 +191,13 @@ async fn main() {
         sleep(Duration::from_secs(15)).await;
 
         let strategy = StrategyEngine::new(strat_cfg.clone());
-        let risk_mgr = RiskManager::new(strat_cfg.strategy.max_position_cents);
+        let mut risk_mgr = RiskManager::new(strat_cfg.risk.clone());
 
         loop {
             run_strategy_cycle(
                 &strat_client,
                 &strategy,
-                &risk_mgr,
+                &mut risk_mgr,
                 &strat_price_cache,
                 &strat_forecast_cache,
                 &strat_markets,
@@ -305,7 +323,7 @@ async fn run_forecast_update(
 async fn run_strategy_cycle(
     client: &KalshiRestClient,
     strategy: &StrategyEngine,
-    risk_mgr: &RiskManager,
+    risk_mgr: &mut RiskManager,
     price_cache: &kalshi_client::PriceCache,
     forecast_cache: &strategy::ForecastCache,
     tracked_markets: &Arc<RwLock<HashMap<String, common::MarketInfo>>>,
@@ -320,6 +338,9 @@ async fn run_strategy_cycle(
             return;
         }
     };
+
+    // Set session balance for drawdown tracking.
+    risk_mgr.set_session_balance(balance);
 
     let position_map: HashMap<String, i64> = positions_vec
         .iter()
@@ -356,14 +377,16 @@ async fn run_strategy_cycle(
     for intent in &approved {
         match client.create_order(intent).await {
             Ok(resp) => {
+                risk_mgr.record_order();
                 info!(
-                    "✅ Order placed: {} {} {} — id={}, status={}, filled={}",
+                    "✅ Order placed: {} {} {} — id={}, status={}, filled={}, fee≈{}¢",
                     match intent.action { common::Action::Buy => "BUY", common::Action::Sell => "SELL" },
                     match intent.side { common::Side::Yes => "YES", common::Side::No => "NO" },
                     intent.ticker,
                     resp.order.order_id,
                     resp.order.status,
                     resp.order.fill_count,
+                    intent.estimated_fee_cents,
                 );
             }
             Err(e) => {

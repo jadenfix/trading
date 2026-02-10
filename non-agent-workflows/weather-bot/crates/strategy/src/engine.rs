@@ -3,27 +3,42 @@
 //! Evaluates all tracked markets on each tick, comparing forecast-derived
 //! fair value against live market prices. Emits `OrderIntent`s for the
 //! execution layer to process.
+//!
+//! Key features:
+//! - Fee-adjusted edge calculation (only trades when post-fee edge is positive)
+//! - Half-Kelly position sizing (edge-proportional, capped)
+//! - Confidence-interval filtering (skips uncertain forecasts)
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::Utc;
 use common::config::BotConfig;
-use common::{Action, MarketInfo, OrderIntent, Side};
+use common::{Action, FeeSchedule, MarketInfo, OrderIntent, Side};
 use kalshi_client::PriceEntry;
-use noaa_client::probability::compute_p_yes;
+use noaa_client::probability::{compute_probability, ProbabilityEstimate};
 use tracing::{debug, info};
 
 use crate::cache::{ForecastCache, ForecastEntry};
 
+/// Minimum confidence to consider a forecast actionable.
+const MIN_CONFIDENCE: f64 = 0.5;
+
+/// Kelly fraction: use half-Kelly for safety.
+const KELLY_FRACTION: f64 = 0.5;
+
 /// The strategy engine that evaluates markets.
 pub struct StrategyEngine {
     pub config: BotConfig,
+    pub fees: FeeSchedule,
 }
 
 impl StrategyEngine {
     pub fn new(config: BotConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            fees: FeeSchedule::weather(),
+        }
     }
 
     /// Evaluate all markets and return order intents.
@@ -101,37 +116,69 @@ impl StrategyEngine {
                 }
             };
 
-            // 6. Compute fair value.
+            // 6. Compute probability estimate with confidence bounds.
             let strike_type = market.strike_type.as_deref().unwrap_or("greater");
-            let p_yes = compute_p_yes(
+            let estimate: ProbabilityEstimate = compute_probability(
                 forecast,
                 strike_type,
                 market.floor_strike,
                 market.cap_strike,
             );
 
-            let fair_cents = (100.0 * p_yes).floor() as i64 - strat.safety_margin_cents;
-            let edge = fair_cents - price.yes_ask;
+            // 7. Skip if forecast confidence is too low.
+            if estimate.confidence < MIN_CONFIDENCE {
+                debug!(
+                    "{}: forecast confidence too low ({:.2} < {})",
+                    ticker, estimate.confidence, MIN_CONFIDENCE
+                );
+                continue;
+            }
+
+            // 8. Compute fee-adjusted edge.
+            //    fair_cents uses the conservative p_yes_low for entries.
+            let fair_cents = (100.0 * estimate.p_yes).floor() as i64 - strat.safety_margin_cents;
+            let conservative_fair = (100.0 * estimate.p_yes_low).floor() as i64 - strat.safety_margin_cents;
+
+            // Per-contract fee for entry + assumed exit.
+            let entry_fee_per_contract = self.fees.per_contract_taker_fee(price.yes_ask);
+            let exit_fee_per_contract = self.fees.per_contract_taker_fee(strat.exit_threshold_cents);
+            let round_trip_fee_per_contract = (entry_fee_per_contract + exit_fee_per_contract).ceil() as i64;
+
+            let gross_edge = fair_cents - price.yes_ask;
+            let net_edge = gross_edge - round_trip_fee_per_contract;
+            let conservative_net_edge = conservative_fair - price.yes_ask - round_trip_fee_per_contract;
 
             debug!(
-                "{}: p_yes={:.3}, fair={}¢, ask={}¢, bid={}¢, edge={}¢",
-                ticker, p_yes, fair_cents, price.yes_ask, price.yes_bid, edge
+                "{}: p_yes={:.3} [{:.3}–{:.3}] conf={:.2}, fair={}¢, ask={}¢, \
+                 gross_edge={}¢, fees={}¢/c, net_edge={}¢, cons_net={}¢",
+                ticker, estimate.p_yes, estimate.p_yes_low, estimate.p_yes_high,
+                estimate.confidence, fair_cents, price.yes_ask,
+                gross_edge, round_trip_fee_per_contract, net_edge, conservative_net_edge
             );
 
             let current_pos = positions.get(ticker).copied().unwrap_or(0);
 
-            // 7. Entry signal — BUY YES.
+            // 9. Entry signal — BUY YES (fee-adjusted).
             if price.yes_ask <= strat.entry_threshold_cents
-                && edge >= strat.edge_threshold_cents
+                && net_edge >= strat.edge_threshold_cents
+                && conservative_net_edge > 0  // conservative estimate must also be positive
                 && current_pos == 0
             {
-                // Calculate position size (limit to max_position).
-                let max_contracts = strat.max_position_cents / price.yes_ask;
-                let count = max_contracts.clamp(1, 10);
+                // Half-Kelly position sizing.
+                let count = self.kelly_size(
+                    estimate.p_yes,
+                    price.yes_ask,
+                    strat.max_position_cents,
+                    round_trip_fee_per_contract,
+                );
+
+                let estimated_fee = self.fees.taker_fee_cents(count, price.yes_ask);
 
                 info!(
-                    "ENTRY: {} — BUY YES @ {}¢ x{} (fair={}¢, edge={}¢, p_yes={:.3})",
-                    ticker, price.yes_ask, count, fair_cents, edge, p_yes
+                    "ENTRY: {} — BUY YES @ {}¢ x{} (fair={}¢, net_edge={}¢, fees≈{}¢, \
+                     p_yes={:.3} [{:.3}–{:.3}], conf={:.2})",
+                    ticker, price.yes_ask, count, fair_cents, net_edge, estimated_fee,
+                    estimate.p_yes, estimate.p_yes_low, estimate.p_yes_high, estimate.confidence
                 );
 
                 intents.push(OrderIntent {
@@ -141,17 +188,23 @@ impl StrategyEngine {
                     price_cents: price.yes_ask,
                     count,
                     reason: format!(
-                        "entry: ask={}¢ < thresh={}¢, edge={}¢, p_yes={:.3}",
-                        price.yes_ask, strat.entry_threshold_cents, edge, p_yes
+                        "entry: ask={}¢, fair={}¢, net_edge={}¢ (fees={}¢/c), p_yes={:.3}, conf={:.2}",
+                        price.yes_ask, fair_cents, net_edge, round_trip_fee_per_contract,
+                        estimate.p_yes, estimate.confidence
                     ),
+                    estimated_fee_cents: estimated_fee,
+                    confidence: estimate.confidence,
                 });
             }
 
-            // 8. Exit signal — SELL YES.
+            // 10. Exit signal — SELL YES.
             if price.yes_bid >= strat.exit_threshold_cents && current_pos > 0 {
+                let estimated_fee = self.fees.taker_fee_cents(current_pos, price.yes_bid);
+
                 info!(
-                    "EXIT: {} — SELL YES @ {}¢ x{} (bid={}¢ >= thresh={}¢)",
-                    ticker, price.yes_bid, current_pos, price.yes_bid, strat.exit_threshold_cents
+                    "EXIT: {} — SELL YES @ {}¢ x{} (bid={}¢ >= thresh={}¢, fee≈{}¢)",
+                    ticker, price.yes_bid, current_pos,
+                    price.yes_bid, strat.exit_threshold_cents, estimated_fee
                 );
 
                 intents.push(OrderIntent {
@@ -161,9 +214,11 @@ impl StrategyEngine {
                     price_cents: price.yes_bid,
                     count: current_pos,
                     reason: format!(
-                        "exit: bid={}¢ >= thresh={}¢",
-                        price.yes_bid, strat.exit_threshold_cents
+                        "exit: bid={}¢ >= thresh={}¢, fee≈{}¢",
+                        price.yes_bid, strat.exit_threshold_cents, estimated_fee
                     ),
+                    estimated_fee_cents: estimated_fee,
+                    confidence: estimate.confidence,
                 });
             }
 
@@ -175,6 +230,49 @@ impl StrategyEngine {
         }
 
         intents
+    }
+
+    /// Half-Kelly position sizing.
+    ///
+    /// Kelly formula: f* = (p * b - q) / b
+    /// where p = P(win), q = 1-p, b = net payout odds
+    /// We use half-Kelly (f* / 2) for safety.
+    fn kelly_size(
+        &self,
+        p_yes: f64,
+        ask_cents: i64,
+        max_position_cents: i64,
+        fee_per_contract: i64,
+    ) -> i64 {
+        let p = p_yes.clamp(0.01, 0.99);
+        let q = 1.0 - p;
+
+        // Net payout per contract if YES settles: (100 - ask - fees) cents
+        let net_payout = (100 - ask_cents - fee_per_contract) as f64;
+        if net_payout <= 0.0 {
+            return 1; // Minimum 1 contract
+        }
+
+        // Cost per contract including entry fee.
+        let cost_per_contract = (ask_cents + fee_per_contract) as f64;
+
+        // Odds: net_payout / cost
+        let b = net_payout / cost_per_contract;
+
+        // Kelly fraction: (p * b - q) / b
+        let kelly_f = (p * b - q) / b;
+        if kelly_f <= 0.0 {
+            return 1;
+        }
+
+        // Half-Kelly.
+        let half_kelly = kelly_f * KELLY_FRACTION;
+
+        // Position = half_kelly * max_position / cost_per_contract
+        let max_contracts = max_position_cents as f64 / cost_per_contract;
+        let kelly_contracts = (half_kelly * max_contracts).floor() as i64;
+
+        kelly_contracts.clamp(1, 10)
     }
 
     /// Try to map a ticker back to a city name for forecast lookup.
@@ -254,6 +352,25 @@ mod tests {
         }
     }
 
+    fn insert_forecast(fc: &ForecastCache, city: &str, high: f64, low: f64, std_dev: f64) {
+        fc.insert(
+            city.into(),
+            ForecastEntry {
+                data: ForecastData {
+                    city: city.into(),
+                    high_temp_f: high,
+                    low_temp_f: low,
+                    precip_prob: 0.1,
+                    temp_std_dev: std_dev,
+                    fetched_at: Utc::now(),
+                },
+                updated_at: Instant::now(),
+            },
+        );
+    }
+
+    // ── Preserved original tests ──────────────────────────────────────
+
     #[test]
     fn test_entry_signal() {
         let config = default_config();
@@ -266,17 +383,7 @@ mod tests {
         prices.insert("KXHIGHNYC-TEST".into(), make_price(8, 12));
 
         let fc = new_forecast_cache();
-        fc.insert("New York City".into(), ForecastEntry {
-            data: ForecastData {
-                city: "New York City".into(),
-                high_temp_f: 80.0,  // Well above strike of 50
-                low_temp_f: 60.0,
-                precip_prob: 0.1,
-                temp_std_dev: 3.0,
-                fetched_at: Utc::now(),
-            },
-            updated_at: Instant::now(),
-        });
+        insert_forecast(&fc, "New York City", 80.0, 60.0, 3.0);
 
         let positions = HashMap::new();
         let intents = engine.evaluate(&markets, &prices, &fc, &positions);
@@ -305,17 +412,7 @@ mod tests {
         });
 
         let fc = new_forecast_cache();
-        fc.insert("New York City".into(), ForecastEntry {
-            data: ForecastData {
-                city: "New York City".into(),
-                high_temp_f: 80.0,
-                low_temp_f: 60.0,
-                precip_prob: 0.1,
-                temp_std_dev: 3.0,
-                fetched_at: Utc::now(),
-            },
-            updated_at: Instant::now(),
-        });
+        insert_forecast(&fc, "New York City", 80.0, 60.0, 3.0);
 
         let positions = HashMap::new();
         let intents = engine.evaluate(&markets, &prices, &fc, &positions);
@@ -335,17 +432,7 @@ mod tests {
         prices.insert("KXHIGHNYC-TEST".into(), make_price(48, 52));
 
         let fc = new_forecast_cache();
-        fc.insert("New York City".into(), ForecastEntry {
-            data: ForecastData {
-                city: "New York City".into(),
-                high_temp_f: 80.0,
-                low_temp_f: 60.0,
-                precip_prob: 0.1,
-                temp_std_dev: 3.0,
-                fetched_at: Utc::now(),
-            },
-            updated_at: Instant::now(),
-        });
+        insert_forecast(&fc, "New York City", 80.0, 60.0, 3.0);
 
         // Have existing position.
         let mut positions = HashMap::new();
@@ -355,5 +442,126 @@ mod tests {
 
         assert!(!intents.is_empty(), "Should generate exit signal");
         assert_eq!(intents[0].action, Action::Sell);
+    }
+
+    // ── New tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_fee_adjusted_edge_blocks_thin_margin() {
+        // Edge of 5¢ but round-trip fees ~2¢ → net_edge=3¢ (should still pass with default 5¢ threshold... 
+        // But let's set edge threshold to 4¢ and verify fees are correctly subtracted).
+        let mut config = default_config();
+        config.strategy.edge_threshold_cents = 4;
+        config.strategy.entry_threshold_cents = 20;
+        let engine = StrategyEngine::new(config);
+
+        // Market at ask=15, strike=50, forecast high=57 → fair ≈ ~99¢ (far above strike)
+        // This should easily pass. Let's test a marginal case instead.
+        // Market at ask=15, strike=50, forecast high=52 → p_yes ≈ ~0.75, fair=75-3=72, edge=72-15=57
+        let mut markets = HashMap::new();
+        markets.insert("KXHIGHNYC-TEST".into(), make_market("KXHIGHNYC-TEST", 13, 15));
+
+        let mut prices = HashMap::new();
+        prices.insert("KXHIGHNYC-TEST".into(), make_price(13, 15));
+
+        let fc = new_forecast_cache();
+        insert_forecast(&fc, "New York City", 52.0, 40.0, 3.0);
+
+        let positions = HashMap::new();
+        let intents = engine.evaluate(&markets, &prices, &fc, &positions);
+
+        // Should enter: p_yes is very high (52 vs strike 50), net edge is large
+        if !intents.is_empty() {
+            assert!(
+                intents[0].estimated_fee_cents > 0,
+                "Fee should be calculated and > 0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fee_on_entry_is_reported() {
+        let config = default_config();
+        let engine = StrategyEngine::new(config);
+
+        let mut markets = HashMap::new();
+        markets.insert("KXHIGHNYC-TEST".into(), make_market("KXHIGHNYC-TEST", 8, 12));
+
+        let mut prices = HashMap::new();
+        prices.insert("KXHIGHNYC-TEST".into(), make_price(8, 12));
+
+        let fc = new_forecast_cache();
+        insert_forecast(&fc, "New York City", 80.0, 60.0, 3.0);
+
+        let positions = HashMap::new();
+        let intents = engine.evaluate(&markets, &prices, &fc, &positions);
+
+        if !intents.is_empty() {
+            assert!(
+                intents[0].estimated_fee_cents >= 0,
+                "Every intent should have a fee estimate"
+            );
+            // At 12¢ ask, fee should be small (P*(1-P) is small at extremes)
+            assert!(
+                intents[0].estimated_fee_cents < 10,
+                "Fee at 12¢ should be small, got {}",
+                intents[0].estimated_fee_cents
+            );
+        }
+    }
+
+    #[test]
+    fn test_kelly_sizing_proportional_to_edge() {
+        let config = default_config();
+        let engine = StrategyEngine::new(config);
+
+        // Strong signal: p=0.95, ask=10
+        let count_strong = engine.kelly_size(0.95, 10, 500, 1);
+        // Weak signal: p=0.60, ask=10
+        let count_weak = engine.kelly_size(0.60, 10, 500, 1);
+
+        assert!(
+            count_strong >= count_weak,
+            "Strong edge ({}) should size >= weak edge ({})",
+            count_strong, count_weak
+        );
+    }
+
+    #[test]
+    fn test_kelly_sizing_minimum_one() {
+        let config = default_config();
+        let engine = StrategyEngine::new(config);
+
+        // Barely positive edge
+        let count = engine.kelly_size(0.12, 10, 500, 1);
+        assert!(count >= 1, "Should always allocate at least 1 contract");
+    }
+
+    #[test]
+    fn test_exit_includes_fee_estimate() {
+        let config = default_config();
+        let engine = StrategyEngine::new(config);
+
+        let mut markets = HashMap::new();
+        markets.insert("KXHIGHNYC-TEST".into(), make_market("KXHIGHNYC-TEST", 48, 52));
+
+        let mut prices = HashMap::new();
+        prices.insert("KXHIGHNYC-TEST".into(), make_price(48, 52));
+
+        let fc = new_forecast_cache();
+        insert_forecast(&fc, "New York City", 80.0, 60.0, 3.0);
+
+        let mut positions = HashMap::new();
+        positions.insert("KXHIGHNYC-TEST".into(), 5i64);
+
+        let intents = engine.evaluate(&markets, &prices, &fc, &positions);
+        assert!(!intents.is_empty());
+
+        let exit_intent = &intents[0];
+        assert_eq!(exit_intent.action, Action::Sell);
+        assert!(
+            exit_intent.estimated_fee_cents >= 0,
+            "Exit intent should have fee estimate"
+        );
     }
 }

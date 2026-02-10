@@ -1,7 +1,7 @@
 //! Risk manager — enforces position limits, concentration limits,
 //! drawdown protection, and order throttling.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use common::config::RiskConfig;

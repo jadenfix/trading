@@ -37,8 +37,8 @@ pub struct ProbabilityEstimate {
 pub fn compute_probability(
     forecast: &ForecastData,
     strike_type: &str,
-    floor_strike: Option<i64>,
-    cap_strike: Option<i64>,
+    floor_strike: Option<f64>,
+    cap_strike: Option<f64>,
 ) -> ProbabilityEstimate {
     let std_dev = adjusted_std_dev(forecast);
 
@@ -50,8 +50,15 @@ pub fn compute_probability(
     let std_dev_high = std_dev * 1.5; // pessimistic uncertainty
     let std_dev_low = (std_dev * 0.7).max(1.5); // optimistic uncertainty
 
-    let p_variant_a = compute_p_yes_inner(forecast, strike_type, floor_strike, cap_strike, std_dev_high);
-    let p_variant_b = compute_p_yes_inner(forecast, strike_type, floor_strike, cap_strike, std_dev_low);
+    let p_variant_a = compute_p_yes_inner(
+        forecast,
+        strike_type,
+        floor_strike,
+        cap_strike,
+        std_dev_high,
+    );
+    let p_variant_b =
+        compute_p_yes_inner(forecast, strike_type, floor_strike, cap_strike, std_dev_low);
 
     let p_yes_low = p_variant_a.min(p_variant_b);
     let p_yes_high = p_variant_a.max(p_variant_b);
@@ -78,8 +85,8 @@ pub fn compute_probability(
 pub fn compute_p_yes(
     forecast: &ForecastData,
     strike_type: &str,
-    floor_strike: Option<i64>,
-    cap_strike: Option<i64>,
+    floor_strike: Option<f64>,
+    cap_strike: Option<f64>,
 ) -> f64 {
     compute_probability(forecast, strike_type, floor_strike, cap_strike).p_yes
 }
@@ -114,21 +121,21 @@ fn precip_adjusted_low(forecast: &ForecastData) -> f64 {
 fn compute_p_yes_inner(
     forecast: &ForecastData,
     strike_type: &str,
-    floor_strike: Option<i64>,
-    cap_strike: Option<i64>,
+    floor_strike: Option<f64>,
+    cap_strike: Option<f64>,
     std_dev: f64,
 ) -> f64 {
     match strike_type {
         "greater" | "greater_or_equal" => {
             // P(high_temp >= strike)
-            let strike = floor_strike.unwrap_or(0) as f64;
+            let strike = floor_strike.unwrap_or(0.0);
             let mean = precip_adjusted_high(forecast);
             let z = (mean - strike) / std_dev;
             normal_cdf(z)
         }
         "less" | "less_or_equal" => {
             // P(low_temp <= strike)
-            let strike = cap_strike.unwrap_or(100) as f64;
+            let strike = cap_strike.unwrap_or(100.0);
             let mean = precip_adjusted_low(forecast);
             let z = (strike - mean) / std_dev;
             normal_cdf(z)
@@ -136,8 +143,8 @@ fn compute_p_yes_inner(
         "between" => {
             // P(floor <= temp <= cap)
             // Use midpoint of high/low as the relevant mean.
-            let floor = floor_strike.unwrap_or(0) as f64;
-            let cap = cap_strike.unwrap_or(100) as f64;
+            let floor = floor_strike.unwrap_or(0.0);
+            let cap = cap_strike.unwrap_or(100.0);
             let high = precip_adjusted_high(forecast);
             let low = precip_adjusted_low(forecast);
             let mean = (high + low) / 2.0;
@@ -226,11 +233,7 @@ mod tests {
     #[test]
     fn test_rational_cdf_at_zero() {
         let cdf = normal_cdf(0.0);
-        assert!(
-            (cdf - 0.5).abs() < 1e-7,
-            "CDF(0) = {} should be 0.5",
-            cdf
-        );
+        assert!((cdf - 0.5).abs() < 1e-7, "CDF(0) = {} should be 0.5", cdf);
     }
 
     #[test]
@@ -240,7 +243,9 @@ mod tests {
             assert!(
                 (sum - 1.0).abs() < 1e-7,
                 "CDF({}) + CDF(-{}) = {} should be 1.0",
-                z, z, sum
+                z,
+                z,
+                sum
             );
         }
     }
@@ -260,7 +265,9 @@ mod tests {
             assert!(
                 (got - expected).abs() < 1e-5,
                 "CDF({}) = {}, expected ~{}",
-                z, got, expected
+                z,
+                got,
+                expected
             );
         }
     }
@@ -271,7 +278,7 @@ mod tests {
     fn test_p_yes_far_above_strike() {
         // Forecast high = 80°F, strike = 50°F, std_dev = 3°F → very likely YES
         let fc = make_forecast(80.0, 60.0, 3.0);
-        let p = compute_p_yes(&fc, "greater", Some(50), None);
+        let p = compute_p_yes(&fc, "greater", Some(50.0), None);
         assert!(p > 0.99, "p={} should be > 0.99", p);
     }
 
@@ -279,7 +286,7 @@ mod tests {
     fn test_p_yes_far_below_strike() {
         // Forecast high = 40°F, strike = 70°F → very unlikely YES
         let fc = make_forecast(40.0, 30.0, 3.0);
-        let p = compute_p_yes(&fc, "greater", Some(70), None);
+        let p = compute_p_yes(&fc, "greater", Some(70.0), None);
         assert!(p < 0.01, "p={} should be < 0.01", p);
     }
 
@@ -287,7 +294,7 @@ mod tests {
     fn test_p_yes_at_strike() {
         // Forecast high = 50°F, strike = 50°F → ~50%
         let fc = make_forecast(50.0, 40.0, 3.0);
-        let p = compute_p_yes(&fc, "greater", Some(50), None);
+        let p = compute_p_yes(&fc, "greater", Some(50.0), None);
         assert!((p - 0.5).abs() < 0.05, "p={} should be ~0.5", p);
     }
 
@@ -295,7 +302,7 @@ mod tests {
     fn test_p_yes_between() {
         // Forecast high=50, low=40 → mean=45; between 40-50 with std_dev=3 → high P
         let fc = make_forecast(50.0, 40.0, 3.0);
-        let p = compute_p_yes(&fc, "between", Some(40), Some(50));
+        let p = compute_p_yes(&fc, "between", Some(40.0), Some(50.0));
         assert!(p > 0.8, "p={} should be > 0.8", p);
     }
 
@@ -303,7 +310,7 @@ mod tests {
     fn test_p_yes_less() {
         // Forecast low = 30°F, strike = 40°F → very likely YES
         let fc = make_forecast(50.0, 30.0, 3.0);
-        let p = compute_p_yes(&fc, "less", None, Some(40));
+        let p = compute_p_yes(&fc, "less", None, Some(40.0));
         assert!(p > 0.95, "p={} should be > 0.95", p);
     }
 
@@ -314,13 +321,14 @@ mod tests {
         let fc_dry = make_forecast_with_precip(55.0, 40.0, 3.0, 0.0);
         let fc_wet = make_forecast_with_precip(55.0, 40.0, 3.0, 0.9);
 
-        let p_dry = compute_p_yes(&fc_dry, "greater", Some(53), None);
-        let p_wet = compute_p_yes(&fc_wet, "greater", Some(53), None);
+        let p_dry = compute_p_yes(&fc_dry, "greater", Some(53.0), None);
+        let p_wet = compute_p_yes(&fc_wet, "greater", Some(53.0), None);
 
         assert!(
             p_wet < p_dry,
             "Wet p={} should be lower than dry p={} for high-temp markets",
-            p_wet, p_dry
+            p_wet,
+            p_dry
         );
     }
 
@@ -330,14 +338,15 @@ mod tests {
         let fc_dry = make_forecast_with_precip(60.0, 35.0, 3.0, 0.0);
         let fc_wet = make_forecast_with_precip(60.0, 35.0, 3.0, 0.9);
 
-        let p_dry = compute_p_yes(&fc_dry, "less", None, Some(34));
-        let p_wet = compute_p_yes(&fc_wet, "less", None, Some(34));
+        let p_dry = compute_p_yes(&fc_dry, "less", None, Some(34.0));
+        let p_wet = compute_p_yes(&fc_wet, "less", None, Some(34.0));
 
         // Wet conditions raise the effective low, so P(low <= 34) should decrease
         assert!(
             p_wet < p_dry,
             "Wet p={} should be lower than dry p={} for very-low-strike",
-            p_wet, p_dry
+            p_wet,
+            p_dry
         );
     }
 
@@ -346,17 +355,19 @@ mod tests {
     #[test]
     fn test_confidence_bounds_ordering() {
         let fc = make_forecast(60.0, 45.0, 4.0);
-        let est = compute_probability(&fc, "greater", Some(55), None);
+        let est = compute_probability(&fc, "greater", Some(55.0), None);
 
         assert!(
             est.p_yes_low <= est.p_yes,
             "p_yes_low={} should be <= p_yes={}",
-            est.p_yes_low, est.p_yes
+            est.p_yes_low,
+            est.p_yes
         );
         assert!(
             est.p_yes <= est.p_yes_high,
             "p_yes={} should be <= p_yes_high={}",
-            est.p_yes, est.p_yes_high
+            est.p_yes,
+            est.p_yes_high
         );
     }
 
@@ -364,7 +375,7 @@ mod tests {
     fn test_high_confidence_for_clear_signal() {
         // Very clear signal: high=80, strike=50, std_dev=2 → high confidence
         let fc = make_forecast(80.0, 60.0, 2.0);
-        let est = compute_probability(&fc, "greater", Some(50), None);
+        let est = compute_probability(&fc, "greater", Some(50.0), None);
 
         assert!(
             est.confidence > 0.9,
@@ -377,7 +388,7 @@ mod tests {
     fn test_low_confidence_near_strike() {
         // Strike exactly at mean with very high uncertainty
         let fc = make_forecast(50.0, 40.0, 12.0);
-        let est = compute_probability(&fc, "greater", Some(50), None);
+        let est = compute_probability(&fc, "greater", Some(50.0), None);
 
         assert!(
             est.confidence < 0.9,

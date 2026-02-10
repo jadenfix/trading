@@ -1,7 +1,5 @@
 [workspace]
 members = [
-    "crates/common",
-    "crates/kalshi_client",
     "crates/noaa_client",
     "crates/strategy",
 ]
@@ -17,8 +15,8 @@ name = "weather-bot"
 path = "src/main.rs"
 
 [dependencies]
-common = { path = "crates/common" }
-kalshi_client = { path = "crates/kalshi_client" }
+common = { path = "../libs/common" }
+kalshi_client = { path = "../libs/kalshi_client" }
 noaa_client = { path = "crates/noaa_client" }
 strategy = { path = "crates/strategy" }
 

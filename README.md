@@ -52,3 +52,10 @@ or
 ```bash
 export ANTHROPIC_API_KEY="[ENCRYPTION_KEY]"
 ```
+
+## Trade Journals
+
+The non-agent bots write runtime JSONL trade journals under:
+
+- `/Users/jadenfix/Desktop/trading/TRADES/arbitrage-bot`
+- `/Users/jadenfix/Desktop/trading/TRADES/weather-bot`

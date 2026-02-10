@@ -68,7 +68,8 @@ impl UniverseBuilder {
             }
         };
 
-        info!("Fetched {} events", events.len());
+        let event_count = events.len();
+        info!("Fetched {} events", event_count);
 
         let mut groups = Vec::new();
 
@@ -121,7 +122,7 @@ impl UniverseBuilder {
         info!(
             "Universe: {} candidate arb groups from {} events",
             groups.len(),
-            groups.len()
+            event_count
         );
 
         groups
@@ -156,14 +157,7 @@ impl UniverseBuilder {
         mutually_exclusive: &bool,
         markets: &[MarketInfo],
     ) -> (bool, Option<EdgeCase>) {
-        // Special case: Single market is self-contained (YES/NO arb).
-        // It is always "mutually exclusive" in the sense that you can't have both terminate YES (unless void).
-        // It is "exhaustive" because YES and NO cover all non-void outcomes.
-        if markets.len() == 1 {
-            return (true, None);
-        }
-
-        if !mutually_exclusive {
+        if markets.is_empty() {
             return (false, Some(EdgeCase::PartialSet));
         }
 
@@ -184,10 +178,26 @@ impl UniverseBuilder {
                 market.rules_secondary.to_lowercase(),
             );
 
-            // Void check still uses everything
             if rules.contains("void") || rules.contains("cancel") {
                 return (false, Some(EdgeCase::VoidPossible));
             }
+        }
+
+        // Special case: Single market is self-contained (YES/NO arb).
+        // It is always "mutually exclusive" in the sense that you can't have both terminate YES (unless void).
+        // It is "exhaustive" because YES and NO cover all non-void outcomes.
+        if markets.len() == 1 {
+            return (true, None);
+        }
+
+        if !mutually_exclusive {
+            return (false, Some(EdgeCase::PartialSet));
+        }
+
+        // If outcomes resolve on different schedules, this is often a date-ladder
+        // style event where "none of the listed outcomes happen" remains possible.
+        if !Self::same_resolution_window(markets) {
+            return (false, Some(EdgeCase::PartialSet));
         }
 
         // Check broader event rules for tie possibility.
@@ -209,11 +219,20 @@ impl UniverseBuilder {
         // If mutually exclusive and no edge cases detected, assume exhaustive.
         (true, None)
     }
+
+    fn same_resolution_window(markets: &[MarketInfo]) -> bool {
+        let first_close = &markets[0].close_time;
+        let first_expiration = &markets[0].expiration_time;
+        markets
+            .iter()
+            .all(|m| &m.close_time == first_close && &m.expiration_time == first_expiration)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, Utc};
 
     fn make_market(ticker: &str, title: &str) -> MarketInfo {
         MarketInfo {
@@ -300,5 +319,28 @@ mod tests {
         // Has tie market, so the "tie" keyword is accounted for.
         assert!(exhaustive);
         assert!(edge.is_none());
+    }
+
+    #[test]
+    fn test_single_market_with_void_rules_is_not_guaranteed() {
+        let mut m = make_market("A-YES", "Team A wins");
+        m.rules_primary = "If canceled, market is void.".into();
+        let (exhaustive, edge) = UniverseBuilder::classify_exhaustiveness(&true, &[m]);
+        assert!(!exhaustive);
+        assert_eq!(edge, Some(EdgeCase::VoidPossible));
+    }
+
+    #[test]
+    fn test_mismatched_resolution_window_is_partial_set() {
+        let mut a = make_market("A-YES", "Outcome A");
+        let mut b = make_market("B-YES", "Outcome B");
+        let now = Utc::now();
+        a.close_time = Some(now);
+        a.expiration_time = Some(now);
+        b.close_time = Some(now + Duration::hours(1));
+        b.expiration_time = Some(now + Duration::hours(1));
+        let (exhaustive, edge) = UniverseBuilder::classify_exhaustiveness(&true, &[a, b]);
+        assert!(!exhaustive);
+        assert_eq!(edge, Some(EdgeCase::PartialSet));
     }
 }

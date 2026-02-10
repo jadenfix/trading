@@ -17,6 +17,9 @@ pub struct ArbConfig {
     #[serde(default = "default_true")]
     pub guaranteed_arb_only: bool,
 
+    #[serde(default = "default_true")]
+    pub strict_binary_only: bool,
+
     #[serde(default = "default_tie_buffer")]
     pub tie_buffer_cents: i64,
 
@@ -151,6 +154,7 @@ impl Default for ArbConfig {
             slippage_buffer_cents: default_slippage(),
             ev_mode_enabled: true,
             guaranteed_arb_only: true,
+            strict_binary_only: true,
             tie_buffer_cents: default_tie_buffer(),
             min_leg_size: default_min_leg_size(),
             default_qty: default_qty(),

@@ -9,7 +9,11 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::arb::{ArbDirection, ArbOpportunity};
+use crate::config::ExecutionConfig;
 use crate::fees::ArbFeeModel;
+
+const CANCEL_RETRIES: usize = 3;
+const UNWIND_RETRIES: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionOutcome {
@@ -21,15 +25,36 @@ pub enum ExecutionOutcome {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnwindPolicy {
+    CrossSpread,
+    CancelOnly,
+}
+
 /// Executor engine.
 pub struct ArbExecutor<'a> {
     client: &'a KalshiRestClient,
     fees: &'a ArbFeeModel,
+    unwind_policy: UnwindPolicy,
 }
 
 impl<'a> ArbExecutor<'a> {
-    pub fn new(client: &'a KalshiRestClient, fees: &'a ArbFeeModel) -> Self {
-        Self { client, fees }
+    pub fn new(
+        client: &'a KalshiRestClient,
+        fees: &'a ArbFeeModel,
+        execution: &ExecutionConfig,
+    ) -> Self {
+        let unwind_policy = if execution.unwind_policy.eq_ignore_ascii_case("cancel_only") {
+            UnwindPolicy::CancelOnly
+        } else {
+            UnwindPolicy::CrossSpread
+        };
+
+        Self {
+            client,
+            fees,
+            unwind_policy,
+        }
     }
 
     /// Execute an arb opportunity using a batched FOK order.
@@ -114,18 +139,27 @@ impl<'a> ArbExecutor<'a> {
                     error!("Batch returned zero order statuses");
                     return ExecutionOutcome::Failed;
                 }
+                if total_legs != opp.legs.len() {
+                    warn!(
+                        "Batch response leg mismatch: expected {} got {}",
+                        opp.legs.len(),
+                        total_legs
+                    );
+                }
 
                 let filled_orders: Vec<_> = responses
                     .orders
                     .iter()
-                    .filter(|o| o.status == "executed" || o.fill_count == opp.qty)
+                    .filter(|o| o.status == "executed" || o.fill_count >= opp.qty)
                     .cloned()
                     .collect();
                 let filled_legs = filled_orders.len();
                 let open_orders: Vec<_> = responses
                     .orders
                     .iter()
-                    .filter(|o| o.fill_count < opp.qty)
+                    .filter(|o| {
+                        o.remaining_count > 0 && !Self::is_terminal_status(o.status.as_str())
+                    })
                     .cloned()
                     .collect();
 
@@ -152,7 +186,15 @@ impl<'a> ArbExecutor<'a> {
 
                     // Cancel unfilled residuals first, then flatten fills.
                     let canceled = self.cancel_open_orders(&open_orders).await;
-                    let unwound = self.unwind_positions(filled_orders).await;
+                    let unwound = match self.unwind_policy {
+                        UnwindPolicy::CrossSpread => self.unwind_positions(filled_orders).await,
+                        UnwindPolicy::CancelOnly => {
+                            warn!(
+                                "Unwind policy is cancel_only; leaving filled legs open for manual reconciliation"
+                            );
+                            false
+                        }
+                    };
                     if canceled && unwound {
                         ExecutionOutcome::PartialFillUnwound
                     } else {
@@ -183,20 +225,36 @@ impl<'a> ArbExecutor<'a> {
             if order.remaining_count <= 0 || Self::is_terminal_status(order.status.as_str()) {
                 continue;
             }
-            match self.client.cancel_order(&order.order_id).await {
-                Ok(()) => {
-                    warn!(
-                        "Canceled residual order {} (ticker={} status={} remaining={})",
-                        order.order_id, order.ticker, order.status, order.remaining_count
-                    );
+
+            let mut canceled = false;
+            for attempt in 1..=CANCEL_RETRIES {
+                match self.client.cancel_order(&order.order_id).await {
+                    Ok(()) => {
+                        warn!(
+                            "Canceled residual order {} (ticker={} status={} remaining={})",
+                            order.order_id, order.ticker, order.status, order.remaining_count
+                        );
+                        canceled = true;
+                        break;
+                    }
+                    Err(e) if attempt < CANCEL_RETRIES => {
+                        warn!(
+                            "Cancel retry {}/{} failed for {} (ticker={}): {}",
+                            attempt, CANCEL_RETRIES, order.order_id, order.ticker, e
+                        );
+                        sleep(Duration::from_millis(100)).await;
+                    }
+                    Err(e) => {
+                        all_ok = false;
+                        error!(
+                            "Failed to cancel residual order {} after {} attempts (ticker={}): {}",
+                            order.order_id, CANCEL_RETRIES, order.ticker, e
+                        );
+                    }
                 }
-                Err(e) => {
-                    all_ok = false;
-                    error!(
-                        "Failed to cancel residual order {} (ticker={}): {}",
-                        order.order_id, order.ticker, e
-                    );
-                }
+            }
+            if !canceled {
+                all_ok = false;
             }
         }
         all_ok
@@ -215,34 +273,59 @@ impl<'a> ArbExecutor<'a> {
                 Action::Sell => Action::Buy,
             };
 
-            let req = CreateOrderRequest {
-                ticker: order.ticker.clone(),
-                side: order.side,
-                action: unwind_action,
-                client_order_id: Uuid::new_v4().to_string(),
-                count: order.fill_count,
-                order_type: OrderType::Market,
-                yes_price: None,
-                no_price: None,
-                expiration_ts: None,
-            };
+            let mut unwound = false;
+            for attempt in 1..=UNWIND_RETRIES {
+                let req = CreateOrderRequest {
+                    ticker: order.ticker.clone(),
+                    side: order.side,
+                    action: unwind_action,
+                    client_order_id: Uuid::new_v4().to_string(),
+                    count: order.fill_count,
+                    order_type: OrderType::Market,
+                    yes_price: None,
+                    no_price: None,
+                    expiration_ts: None,
+                };
 
-            // Use batch endpoint so we can pass true Market order payload.
-            match self.client.create_batch_orders(vec![req.clone()]).await {
-                Ok(resp) => {
-                    let status = resp
-                        .orders
-                        .first()
-                        .map(|o| o.status.as_str())
-                        .unwrap_or("unknown");
-                    warn!("Unwound {} x {} (status={})", req.ticker, req.count, status);
+                // Use batch endpoint so we can pass true Market order payload.
+                match self.client.create_batch_orders(vec![req.clone()]).await {
+                    Ok(resp) => {
+                        let first = resp.orders.first();
+                        let status = first.map(|o| o.status.as_str()).unwrap_or("unknown");
+                        let fill_count = first.map(|o| o.fill_count).unwrap_or(0);
+                        if fill_count >= req.count || status == "executed" {
+                            warn!("Unwound {} x {} (status={})", req.ticker, req.count, status);
+                            unwound = true;
+                            break;
+                        }
+                        warn!(
+                            "Unwind retry {}/{} for {} returned status={} fill_count={}/{}",
+                            attempt, UNWIND_RETRIES, req.ticker, status, fill_count, req.count
+                        );
+                    }
+                    Err(e) if attempt < UNWIND_RETRIES => {
+                        warn!(
+                            "Unwind retry {}/{} failed for {}: {}",
+                            attempt, UNWIND_RETRIES, order.ticker, e
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            "CRITICAL: FAILED TO UNWIND {} after {} attempts: {}",
+                            order.ticker, UNWIND_RETRIES, e
+                        );
+                    }
                 }
-                Err(e) => {
-                    all_ok = false;
-                    error!("CRITICAL: FAILED TO UNWIND {}: {}", req.ticker, e);
-                    // Retry logic would go here.
+
+                if attempt < UNWIND_RETRIES {
+                    sleep(Duration::from_millis(150)).await;
                 }
             }
+
+            if !unwound {
+                all_ok = false;
+            }
+
             // Small delay to avoid rate limits during panic
             sleep(Duration::from_millis(50)).await;
         }

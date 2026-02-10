@@ -14,6 +14,8 @@ slippage_buffer_cents = 1
 ev_mode_enabled = true
 # If true, only trade guaranteed exhaustive arbs (no EV heuristics)
 guaranteed_arb_only = true
+# If true, only evaluate binary sets (1 market YES/NO or 2-outcome events)
+strict_binary_only = true
 # Extra buffer in cents required for EV-mode trades (on top of min_profit)
 tie_buffer_cents = 5
 # Minimum top-of-book size per leg to consider tradeable
@@ -50,7 +52,7 @@ min_balance_cents = 100
 max_daily_loss_cents = 2000
 
 [execution]
-# Order time-in-force: "fok" (fill-or-kill) or "gtc" (good-til-cancel)
+# Order time-in-force: keep "fok" for arbitrage safety.
 time_in_force = "fok"
 # Unwind policy on partial fills: "cross_spread" or "cancel_only"
 unwind_policy = "cross_spread"

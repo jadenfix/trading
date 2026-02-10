@@ -20,6 +20,7 @@ A high-performance arbitrage bot for Kalshi prediction markets.
 1. **Configure**:
    - Copy `config.toml` and adjust thresholds (min profit, slippage buffer, etc.).
    - Keep `arb.guaranteed_arb_only = true` for only mathematically guaranteed set arbs.
+   - Set `arb.max_days_to_resolution` to limit universe discovery to near-term events.
    - Set environment variables `KALSHI_API_KEY` and `KALSHI_SECRET_KEY`.
    - If logs show frequent `no quote data` / `stale quotes`, increase `timing.quote_stale_secs`.
    - Optional endpoint overrides for network/DNS issues:

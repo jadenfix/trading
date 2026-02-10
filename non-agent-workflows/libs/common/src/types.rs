@@ -28,9 +28,12 @@ mod flexible_i64 {
                 }
             }
             Value::String(s) => {
-                if let Ok(i) = s.parse::<i64>() {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    Ok(0)
+                } else if let Ok(i) = trimmed.parse::<i64>() {
                     Ok(i)
-                } else if let Ok(f) = s.parse::<f64>() {
+                } else if let Ok(f) = trimmed.parse::<f64>() {
                     Ok(f.round() as i64)
                 } else {
                     Err(serde::de::Error::custom(format!(
@@ -39,6 +42,7 @@ mod flexible_i64 {
                     )))
                 }
             }
+            Value::Null => Ok(0),
             _ => Err(serde::de::Error::custom(format!(
                 "Expected number or string, got {:?}",
                 v
@@ -78,6 +82,88 @@ mod flexible_option_i64 {
             Some(Value::Null) | None => Ok(None),
             _ => Ok(None),
         }
+    }
+}
+
+mod flexible_string {
+    use serde::{Deserialize, Deserializer};
+    use serde_json::Value;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let v = Option::<Value>::deserialize(deserializer)?;
+        Ok(match v {
+            Some(Value::String(s)) => s,
+            Some(Value::Number(n)) => n.to_string(),
+            Some(Value::Bool(b)) => b.to_string(),
+            Some(Value::Null) | None => String::new(),
+            Some(other) => other.to_string(),
+        })
+    }
+}
+
+mod flexible_side {
+    use super::Side;
+    use serde::{Deserialize, Deserializer};
+    use serde_json::Value;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Side, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let v = Option::<Value>::deserialize(deserializer)?;
+        if let Some(Value::String(s)) = v {
+            match s.trim().to_ascii_lowercase().as_str() {
+                "yes" => return Ok(Side::Yes),
+                "no" => return Ok(Side::No),
+                _ => {}
+            }
+        }
+        Ok(Side::default())
+    }
+}
+
+mod flexible_action {
+    use super::Action;
+    use serde::{Deserialize, Deserializer};
+    use serde_json::Value;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Action, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let v = Option::<Value>::deserialize(deserializer)?;
+        if let Some(Value::String(s)) = v {
+            match s.trim().to_ascii_lowercase().as_str() {
+                "buy" => return Ok(Action::Buy),
+                "sell" => return Ok(Action::Sell),
+                _ => {}
+            }
+        }
+        Ok(Action::default())
+    }
+}
+
+mod flexible_order_type {
+    use super::OrderType;
+    use serde::{Deserialize, Deserializer};
+    use serde_json::Value;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<OrderType, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let v = Option::<Value>::deserialize(deserializer)?;
+        if let Some(Value::String(s)) = v {
+            match s.trim().to_ascii_lowercase().as_str() {
+                "limit" => return Ok(OrderType::Limit),
+                "market" => return Ok(OrderType::Market),
+                _ => {}
+            }
+        }
+        Ok(OrderType::default())
     }
 }
 
@@ -256,14 +342,23 @@ pub struct CreateOrderResponse {
 /// An order as returned by the Kalshi API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderInfo {
+    #[serde(default, deserialize_with = "flexible_string::deserialize")]
     pub order_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flexible_string::deserialize")]
     pub client_order_id: String,
+    #[serde(default, deserialize_with = "flexible_string::deserialize")]
     pub ticker: String,
+    #[serde(default, deserialize_with = "flexible_side::deserialize")]
     pub side: Side,
+    #[serde(default, deserialize_with = "flexible_action::deserialize")]
     pub action: Action,
-    #[serde(rename = "type")]
+    #[serde(
+        rename = "type",
+        default,
+        deserialize_with = "flexible_order_type::deserialize"
+    )]
     pub order_type: OrderType,
+    #[serde(default, deserialize_with = "flexible_string::deserialize")]
     pub status: String,
     #[serde(default, deserialize_with = "flexible_i64::deserialize")]
     pub yes_price: i64,
@@ -288,6 +383,12 @@ pub enum Side {
     No,
 }
 
+impl Default for Side {
+    fn default() -> Self {
+        Self::Yes
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
@@ -295,11 +396,23 @@ pub enum Action {
     Sell,
 }
 
+impl Default for Action {
+    fn default() -> Self {
+        Self::Buy
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderType {
     Limit,
     Market,
+}
+
+impl Default for OrderType {
+    fn default() -> Self {
+        Self::Limit
+    }
 }
 
 // ── Position Types ────────────────────────────────────────────────────
@@ -402,6 +515,7 @@ pub struct WsMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_taker_fee_50c_100_contracts() {
@@ -451,6 +565,59 @@ mod tests {
         // 1 contract at 50¢: 0.07 * 1 * 0.5 * 0.5 = $0.0175 → ceil to $0.02 = 2¢
         let fee = fs.taker_fee_cents(1, 50);
         assert_eq!(fee, 2, "Fractional cents should round up");
+    }
+
+    #[test]
+    fn test_order_info_tolerates_null_and_missing_fields() {
+        let payload = json!({
+            "order_id": null,
+            "client_order_id": null,
+            "ticker": null,
+            "side": null,
+            "action": null,
+            "type": null,
+            "status": null,
+            "yes_price": null,
+            "no_price": "",
+            "fill_count": null,
+            "remaining_count": null,
+            "initial_count": null,
+            "taker_fees": null,
+            "maker_fees": null
+        });
+
+        let parsed: OrderInfo = serde_json::from_value(payload).expect("should deserialize");
+        assert_eq!(parsed.order_id, "");
+        assert_eq!(parsed.client_order_id, "");
+        assert_eq!(parsed.ticker, "");
+        assert_eq!(parsed.status, "");
+        assert_eq!(parsed.side, Side::Yes);
+        assert_eq!(parsed.action, Action::Buy);
+        assert_eq!(parsed.order_type, OrderType::Limit);
+        assert_eq!(parsed.yes_price, 0);
+        assert_eq!(parsed.no_price, 0);
+        assert_eq!(parsed.fill_count, 0);
+    }
+
+    #[test]
+    fn test_batch_response_tolerates_entries_without_order_id() {
+        let payload = json!({
+            "orders": [
+                {
+                    "ticker": "KXTEST-26",
+                    "status": "rejected",
+                    "fill_count": 0,
+                    "remaining_count": 0
+                }
+            ]
+        });
+
+        let parsed: BatchOrderResponse =
+            serde_json::from_value(payload).expect("should deserialize");
+        assert_eq!(parsed.orders.len(), 1);
+        assert_eq!(parsed.orders[0].order_id, "");
+        assert_eq!(parsed.orders[0].ticker, "KXTEST-26");
+        assert_eq!(parsed.orders[0].status, "rejected");
     }
 }
 

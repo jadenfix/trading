@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use clap::Parser;
 use serde_json::json;
 use tokio::sync::{Mutex, RwLock};
@@ -50,6 +50,24 @@ type SharedTradeJournal = Arc<Mutex<TradeJournal>>;
 
 fn now_iso() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn resolves_within_days_window(
+    market: &common::MarketInfo,
+    now: DateTime<Utc>,
+    max_days_to_resolution: i64,
+) -> bool {
+    if max_days_to_resolution <= 0 {
+        return false;
+    }
+
+    let Some(resolution_time) = market.close_time.or(market.expiration_time) else {
+        return false;
+    };
+
+    let remaining = resolution_time - now;
+    remaining > chrono::Duration::zero()
+        && remaining < chrono::Duration::days(max_days_to_resolution)
 }
 
 fn resolve_repo_root() -> Option<PathBuf> {
@@ -179,11 +197,12 @@ async fn main() {
         cfg.cities.iter().map(|c| &c.name).collect::<Vec<_>>()
     );
     info!(
-        "Strategy: entry≤{}¢, exit≥{}¢, edge≥{}¢, max_pos={}¢",
+        "Strategy: entry≤{}¢, exit≥{}¢, edge≥{}¢, max_pos={}¢, window<{}d",
         cfg.strategy.entry_threshold_cents,
         cfg.strategy.exit_threshold_cents,
         cfg.strategy.edge_threshold_cents,
-        cfg.risk.max_position_cents,
+        cfg.strategy.max_position_cents,
+        cfg.strategy.max_days_to_resolution,
     );
     info!(
         "Risk: max_city={}¢, max_total={}¢, max_daily_loss={}¢, orders/min={}",
@@ -223,7 +242,9 @@ async fn main() {
                 "exit_threshold_cents": cfg.strategy.exit_threshold_cents,
                 "edge_threshold_cents": cfg.strategy.edge_threshold_cents,
                 "max_trades_per_run": cfg.strategy.max_trades_per_run,
-                "max_spread_cents": cfg.strategy.max_spread_cents
+                "max_spread_cents": cfg.strategy.max_spread_cents,
+                "max_position_cents": cfg.strategy.max_position_cents,
+                "max_days_to_resolution": cfg.strategy.max_days_to_resolution
             },
             "timing": {
                 "scan_interval_secs": cfg.timing.scan_interval_secs,
@@ -587,6 +608,17 @@ async fn run_discovery(
             }
         }
     }
+
+    let pre_window_count = all_markets.len();
+    let now = Utc::now();
+    all_markets
+        .retain(|m| resolves_within_days_window(m, now, cfg.strategy.max_days_to_resolution));
+    info!(
+        "Discovery window: kept {} / {} markets with resolution < {} days",
+        all_markets.len(),
+        pre_window_count,
+        cfg.strategy.max_days_to_resolution
+    );
 
     // Update shared state.
     let new_tickers: Vec<String> = all_markets.iter().map(|m| m.ticker.clone()).collect();

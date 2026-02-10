@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use common::config::CityConfig;
 use common::{Error, ForecastData};
 use serde::Deserialize;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// NOAA API client with connection pooling and User-Agent header.
 #[derive(Debug, Clone)]

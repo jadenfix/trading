@@ -32,16 +32,16 @@ enum UnwindPolicy {
 }
 
 /// Executor engine.
-pub struct ArbExecutor<'a> {
-    client: &'a KalshiRestClient,
-    fees: &'a ArbFeeModel,
+pub struct ArbExecutor {
+    client: KalshiRestClient,
+    fees: ArbFeeModel,
     unwind_policy: UnwindPolicy,
 }
 
-impl<'a> ArbExecutor<'a> {
+impl ArbExecutor {
     pub fn new(
-        client: &'a KalshiRestClient,
-        fees: &'a ArbFeeModel,
+        client: &KalshiRestClient,
+        fees: &ArbFeeModel,
         execution: &ExecutionConfig,
     ) -> Self {
         let unwind_policy = if execution.unwind_policy.eq_ignore_ascii_case("cancel_only") {
@@ -51,8 +51,8 @@ impl<'a> ArbExecutor<'a> {
         };
 
         Self {
-            client,
-            fees,
+            client: client.clone(),
+            fees: fees.clone(),
             unwind_policy,
         }
     }

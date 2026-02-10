@@ -6,6 +6,8 @@ ARB_DIR="$ROOT_DIR/non-agent-workflows/arbitrage-bot"
 WEATHER_DIR="$ROOT_DIR/non-agent-workflows/weather-bot"
 TRADES_DIR="${TRADES_DIR:-$ROOT_DIR/TRADES}"
 MODE="${1:-prod}"
+LOCK_DIR="$ROOT_DIR/.run-bots.lock"
+LOCK_OWNED=0
 
 usage() {
   cat <<'EOF'
@@ -44,12 +46,29 @@ export TRADES_DIR
 export USE_DEMO="${USE_DEMO:-0}"
 
 if [[ "${ALLOW_MULTI:-0}" != "1" ]]; then
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    LOCK_PID=""
+    if [[ -f "$LOCK_DIR/pid" ]]; then
+      LOCK_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    fi
+    if [[ -n "$LOCK_PID" ]] && kill -0 "$LOCK_PID" 2>/dev/null; then
+      echo "run-bots.sh already running (pid=$LOCK_PID). Stop it first or set ALLOW_MULTI=1." >&2
+      exit 1
+    fi
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR"
+  fi
+  echo "$$" > "$LOCK_DIR/pid"
+  LOCK_OWNED=1
+
   if pgrep -f 'target/release/arbitrage-bot' >/dev/null 2>&1; then
     echo "arbitrage-bot appears to already be running. Stop it first or set ALLOW_MULTI=1." >&2
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
     exit 1
   fi
   if pgrep -f 'target/release/weather-bot' >/dev/null 2>&1; then
     echo "weather-bot appears to already be running. Stop it first or set ALLOW_MULTI=1." >&2
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
     exit 1
   fi
 fi
@@ -81,6 +100,9 @@ cleanup() {
   fi
   if [[ -n "${WEATHER_PID:-}" ]] && kill -0 "$WEATHER_PID" 2>/dev/null; then
     kill "$WEATHER_PID" 2>/dev/null || true
+  fi
+  if [[ "${ALLOW_MULTI:-0}" != "1" && "$LOCK_OWNED" == "1" ]]; then
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
   fi
   wait 2>/dev/null || true
   exit "$code"

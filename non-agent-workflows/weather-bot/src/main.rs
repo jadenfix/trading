@@ -45,7 +45,6 @@ async fn main() {
                 .unwrap_or_else(|_| "weather_bot=info,kalshi_client=info,noaa_client=info,strategy=info".into()),
         )
         .with_target(true)
-        .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
         .init();
 
     let cli = Cli::parse();
@@ -107,7 +106,7 @@ async fn main() {
 
     let noaa = NoaaClient::new();
     let strategy = StrategyEngine::new(cfg.clone());
-    let risk_mgr = RiskManager::new(cfg.strategy.max_position_cents);
+    let _risk_mgr = RiskManager::new(cfg.strategy.max_position_cents);
 
     // ── Dry-run mode ─────────────────────────────────────────────────
     if cli.dry_run {

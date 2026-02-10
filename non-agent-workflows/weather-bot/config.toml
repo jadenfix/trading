@@ -1,0 +1,80 @@
+# Weather Bot — Default Configuration
+# Override with environment variables or .env file.
+# KALSHI_API_KEY and KALSHI_SECRET_KEY must be set in .env or environment.
+
+# Use demo environment (set to false for production)
+use_demo = true
+
+# Series ticker prefixes for weather market discovery.
+series_prefixes = [
+    "KXHIGHNYC",
+    "KXHIGHCHI",
+    "KXHIGHSEA",
+    "KXHIGHATL",
+    "KXHIGHDAL",
+]
+
+[strategy]
+entry_threshold_cents = 15      # Buy YES when ask ≤ this
+exit_threshold_cents = 45       # Sell YES when bid ≥ this
+edge_threshold_cents = 5        # Min fair-ask spread to enter
+safety_margin_cents = 3         # Subtracted from fair value
+max_position_cents = 500        # $5 max per market
+max_trades_per_run = 5          # Trades per evaluation cycle
+max_spread_cents = 10           # Skip markets with wider spreads
+min_hours_before_close = 2.0    # Don't trade near close
+
+[timing]
+scan_interval_secs = 120        # Strategy evaluation interval
+forecast_interval_secs = 1800   # Forecast refresh (30 min)
+discovery_interval_secs = 1800  # Market discovery refresh
+price_stale_secs = 300          # Price data staleness (5 min)
+forecast_stale_secs = 3600      # Forecast staleness (1 hour)
+
+# Cities are configured with pre-resolved NWS gridpoint coordinates.
+# Modify if targeting additional cities.
+
+[[cities]]
+name = "New York City"
+lat = 40.7128
+lon = -74.006
+wfo = "OKX"
+grid_x = 33
+grid_y = 37
+series_prefix = "KXHIGHNYC"
+
+[[cities]]
+name = "Chicago"
+lat = 41.8781
+lon = -87.6298
+wfo = "LOT"
+grid_x = 76
+grid_y = 73
+series_prefix = "KXHIGHCHI"
+
+[[cities]]
+name = "Seattle"
+lat = 47.6062
+lon = -122.3321
+wfo = "SEW"
+grid_x = 124
+grid_y = 67
+series_prefix = "KXHIGHSEA"
+
+[[cities]]
+name = "Atlanta"
+lat = 33.749
+lon = -84.388
+wfo = "FFC"
+grid_x = 50
+grid_y = 86
+series_prefix = "KXHIGHATL"
+
+[[cities]]
+name = "Dallas"
+lat = 32.7767
+lon = -96.797
+wfo = "FWD"
+grid_x = 80
+grid_y = 108
+series_prefix = "KXHIGHDAL"

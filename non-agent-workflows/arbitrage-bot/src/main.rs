@@ -7,7 +7,7 @@
 
 mod config;
 
-use std::sync::Arc;
+
 use std::time::{Duration, Instant};
 use std::{
     collections::HashSet,
@@ -283,7 +283,7 @@ async fn main() {
     }
 
     let trades_dir = resolve_trades_dir();
-    let mut trade_journal = match TradeJournal::open(trades_dir) {
+    let trade_journal = match TradeJournal::open(trades_dir) {
         Ok(journal) => journal,
         Err(e) => {
             error!("Failed to initialize trade journal: {}", e);
@@ -440,441 +440,461 @@ async fn main() {
     let fees = ArbFeeModel::new(cfg.arb.slippage_buffer_cents);
     let mut risk = ArbRiskManager::new(cfg.risk.clone());
     let exec = ArbExecutor::new(&rest_client, &fees, &cfg.execution);
-    let mut last_balance_refresh = Instant::now();
-    let mut last_balance_ok: Option<Instant> = None;
+    
+    // Dependencies for the strategy task
+    let strat_client = rest_client.clone();
+    let strat_cfg = cfg.clone();
+    let strat_journal = trade_journal.clone();
+    let strat_tickers = tickers_to_track.clone();
+    let is_dry_run = cli.dry_run;
 
-    if !cli.dry_run {
-        match fetch_balance_with_retry(&rest_client, 3, Duration::from_secs(2)).await {
-            Some(balance) => {
-                if let Err(e) = risk.update_balance(balance) {
-                    error!("Startup risk gate failed: {}", e);
-                    write_trade_event(
-                        &mut trade_journal,
-                        json!({
-                            "ts": now_iso(),
-                            "kind": "startup_risk_gate",
-                            "status": "error",
-                            "balance_cents": balance,
-                            "error": e.to_string()
-                        }),
-                    );
-                    return;
-                }
-                info!("Pre-trade balance check passed: {}¢", balance);
-                last_balance_ok = Some(Instant::now());
-                write_trade_event(
-                    &mut trade_journal,
-                    json!({
-                        "ts": now_iso(),
-                        "kind": "startup_balance_check",
-                        "status": "ok",
-                        "balance_cents": balance
-                    }),
-                );
-            }
-            None => {
-                error!("Unable to fetch account balance; refusing live execution.");
-                write_trade_event(
-                    &mut trade_journal,
-                    json!({
-                        "ts": now_iso(),
-                        "kind": "startup_balance_check",
-                        "status": "error",
-                        "error": "unable to fetch account balance"
-                    }),
-                );
-                return;
-            }
-        }
-    }
+    let strategy_handle = tokio::spawn(async move {
+        let mut last_balance_refresh = Instant::now();
+        let mut last_balance_ok: Option<Instant> = None;
 
-    // Wait for initial universe.
-    info!("Waiting for universe discovery...");
-    let mut wait_log_timer = Instant::now();
-    while strategy_universe.read().await.is_empty() {
-        if wait_log_timer.elapsed() >= Duration::from_secs(15) {
-            info!("Still waiting for initial universe discovery...");
-            write_trade_event(
-                &mut trade_journal,
-                json!({
-                    "ts": now_iso(),
-                    "kind": "universe_waiting",
-                    "status": "pending"
-                }),
-            );
-            wait_log_timer = Instant::now();
-        }
-        sleep(Duration::from_secs(2)).await;
-    }
-
-    info!("Starting evaluation loop...");
-    let mut prev_cycle_opps: HashSet<u64> = HashSet::new();
-    let mut last_heartbeat = Instant::now();
-    let mut cycles_since_heartbeat: u64 = 0;
-    let mut new_opps_since_heartbeat: usize = 0;
-    let mut execution_attempts_since_heartbeat: usize = 0;
-    let mut risk_rejects_since_heartbeat: usize = 0;
-    let mut execution_failures_since_heartbeat: usize = 0;
-
-    loop {
-        cycles_since_heartbeat = cycles_since_heartbeat.saturating_add(1);
-
-        if !cli.dry_run && last_balance_refresh.elapsed() >= Duration::from_secs(30) {
-            last_balance_refresh = Instant::now();
-            match rest_client.get_balance().await {
-                Ok(balance) => {
-                    last_balance_ok = Some(Instant::now());
+        if !is_dry_run {
+            match fetch_balance_with_retry(&strat_client, 3, Duration::from_secs(2)).await {
+                Some(balance) => {
                     if let Err(e) = risk.update_balance(balance) {
-                        error!("Risk kill switch engaged: {}", e);
+                        error!("Startup risk gate failed: {}", e);
                         write_trade_event(
-                            &mut trade_journal,
+                            &strat_journal,
                             json!({
                                 "ts": now_iso(),
-                                "kind": "risk_kill_switch",
-                                "reason": "balance_guard",
+                                "kind": "startup_risk_gate",
+                                "status": "error",
                                 "balance_cents": balance,
                                 "error": e.to_string()
                             }),
-                        );
+                        ).await;
                         return;
                     }
-                    debug!("Balance heartbeat: {}¢", balance);
+                    info!("Pre-trade balance check passed: {}¢", balance);
+                    last_balance_ok = Some(Instant::now());
                     write_trade_event(
-                        &mut trade_journal,
+                        &strat_journal,
                         json!({
                             "ts": now_iso(),
-                            "kind": "balance_heartbeat",
+                            "kind": "startup_balance_check",
                             "status": "ok",
                             "balance_cents": balance
                         }),
-                    );
+                    ).await;
                 }
-                Err(e) => {
-                    warn!("Balance heartbeat failed: {}", e);
+                None => {
+                    error!("Unable to fetch account balance; refusing live execution.");
                     write_trade_event(
-                        &mut trade_journal,
+                        &strat_journal,
                         json!({
                             "ts": now_iso(),
-                            "kind": "balance_heartbeat",
+                            "kind": "startup_balance_check",
                             "status": "error",
-                            "error": e.to_string()
+                            "error": "unable to fetch account balance"
                         }),
-                    );
+                    ).await;
+                    return;
                 }
             }
         }
-        if risk.kill_switch_engaged() {
-            error!("Kill switch is engaged. Stopping execution loop.");
-            write_trade_event(
-                &mut trade_journal,
-                json!({
-                    "ts": now_iso(),
-                    "kind": "risk_kill_switch",
-                    "reason": "explicit_state",
-                }),
-            );
-            return;
+
+        // Wait for initial universe.
+        info!("Waiting for universe discovery...");
+        let mut wait_log_timer = Instant::now();
+        while strategy_universe.read().await.is_empty() {
+            if wait_log_timer.elapsed() >= Duration::from_secs(15) {
+                info!("Still waiting for initial universe discovery...");
+                write_trade_event(
+                    &strat_journal,
+                    json!({
+                        "ts": now_iso(),
+                        "kind": "universe_waiting",
+                        "status": "pending"
+                    }),
+                ).await;
+                wait_log_timer = Instant::now();
+            }
+            sleep(Duration::from_secs(2)).await;
         }
 
-        let groups = strategy_universe.read().await.clone();
-        let group_count = groups.len();
-        let mut current_cycle_opps: HashSet<u64> = HashSet::new();
-        let mut new_opp_count = 0usize;
+        info!("Starting evaluation loop...");
+        let mut prev_cycle_opps: HashSet<u64> = HashSet::new();
+        let mut last_heartbeat = Instant::now();
+        let mut cycles_since_heartbeat: u64 = 0;
+        let mut new_opps_since_heartbeat: usize = 0;
+        let mut execution_attempts_since_heartbeat: usize = 0;
+        let mut risk_rejects_since_heartbeat: usize = 0;
+        let mut execution_failures_since_heartbeat: usize = 0;
 
-        let evaluator = ArbEvaluator::new(&fees, &quote_book);
+        loop {
+            cycles_since_heartbeat = cycles_since_heartbeat.saturating_add(1);
 
-        for group in groups {
-            // Evaluate.
-            if let Some(opp) = evaluator
-                .evaluate(
-                    &group,
-                    cfg.arb.min_profit_cents,
-                    cfg.arb.ev_mode_enabled,
-                    cfg.arb.guaranteed_arb_only,
-                    cfg.arb.strict_binary_only,
-                    cfg.arb.tie_buffer_cents,
-                    cfg.timing.quote_stale_secs,
-                    cfg.arb.default_qty,
-                )
-                .await
-            {
-                let fingerprint = opportunity_fingerprint(&opp);
-                current_cycle_opps.insert(fingerprint);
-                let is_new = !prev_cycle_opps.contains(&fingerprint);
-
-                if is_new {
-                    new_opp_count += 1;
-                    new_opps_since_heartbeat = new_opps_since_heartbeat.saturating_add(1);
-                    info!(
-                        "OPPORTUNITY FOUND: event={} direction={:?} legs={} net={}¢ reason={}",
-                        opp.group_event_ticker,
-                        opp.direction,
-                        opp.legs.len(),
-                        opp.net_edge_cents,
-                        opp.reason
-                    );
-                    write_trade_event(
-                        &mut trade_journal,
-                        json!({
-                            "ts": now_iso(),
-                            "kind": "opportunity_found",
-                            "fingerprint": fingerprint,
-                            "event_ticker": &opp.group_event_ticker,
-                            "direction": direction_label(opp.direction),
-                            "qty": opp.qty,
-                            "gross_edge_cents": opp.gross_edge_cents,
-                            "net_edge_cents": opp.net_edge_cents,
-                            "reason": &opp.reason,
-                            "legs": legs_json(&opp)
-                        }),
-                    );
-                }
-
-                if cli.dry_run {
-                    if is_new {
-                        info!("Dry-run: skipping execution.");
+            if !is_dry_run && last_balance_refresh.elapsed() >= Duration::from_secs(30) {
+                last_balance_refresh = Instant::now();
+                match strat_client.get_balance().await {
+                    Ok(balance) => {
+                        last_balance_ok = Some(Instant::now());
+                        if let Err(e) = risk.update_balance(balance) {
+                            error!("Risk kill switch engaged: {}", e);
+                            write_trade_event(
+                                &strat_journal,
+                                json!({
+                                    "ts": now_iso(),
+                                    "kind": "risk_kill_switch",
+                                    "reason": "balance_guard",
+                                    "balance_cents": balance,
+                                    "error": e.to_string()
+                                }),
+                            ).await;
+                            return;
+                        }
+                        debug!("Balance heartbeat: {}¢", balance);
                         write_trade_event(
-                            &mut trade_journal,
+                            &strat_journal,
                             json!({
                                 "ts": now_iso(),
-                                "kind": "dry_run_skip",
+                                "kind": "balance_heartbeat",
+                                "status": "ok",
+                                "balance_cents": balance
+                            }),
+                        ).await;
+                    }
+                    Err(e) => {
+                        warn!("Balance heartbeat failed: {}", e);
+                        write_trade_event(
+                            &strat_journal,
+                            json!({
+                                "ts": now_iso(),
+                                "kind": "balance_heartbeat",
+                                "status": "error",
+                                "error": e.to_string()
+                            }),
+                        ).await;
+                    }
+                }
+            }
+            if risk.kill_switch_engaged() {
+                error!("Kill switch is engaged. Stopping execution loop.");
+                write_trade_event(
+                    &strat_journal,
+                    json!({
+                        "ts": now_iso(),
+                        "kind": "risk_kill_switch",
+                        "reason": "explicit_state",
+                    }),
+                ).await;
+                return;
+            }
+
+            let groups = strategy_universe.read().await.clone();
+            let group_count = groups.len();
+            let mut current_cycle_opps: HashSet<u64> = HashSet::new();
+            let mut new_opp_count = 0usize;
+
+            let evaluator = ArbEvaluator::new(&fees, &quote_book);
+
+            for group in groups {
+                // Evaluate.
+                if let Some(opp) = evaluator
+                    .evaluate(
+                        &group,
+                        strat_cfg.arb.min_profit_cents,
+                        strat_cfg.arb.ev_mode_enabled,
+                        strat_cfg.arb.guaranteed_arb_only,
+                        strat_cfg.arb.strict_binary_only,
+                        strat_cfg.arb.tie_buffer_cents,
+                        strat_cfg.timing.quote_stale_secs,
+                        strat_cfg.arb.default_qty,
+                    )
+                    .await
+                {
+                    let fingerprint = opportunity_fingerprint(&opp);
+                    current_cycle_opps.insert(fingerprint);
+                    let is_new = !prev_cycle_opps.contains(&fingerprint);
+
+                    if is_new {
+                        new_opp_count += 1;
+                        new_opps_since_heartbeat = new_opps_since_heartbeat.saturating_add(1);
+                        info!(
+                            "OPPORTUNITY FOUND: event={} direction={:?} legs={} net={}¢ reason={}",
+                            opp.group_event_ticker,
+                            opp.direction,
+                            opp.legs.len(),
+                            opp.net_edge_cents,
+                            opp.reason
+                        );
+                        write_trade_event(
+                            &strat_journal,
+                            json!({
+                                "ts": now_iso(),
+                                "kind": "opportunity_found",
                                 "fingerprint": fingerprint,
                                 "event_ticker": &opp.group_event_ticker,
                                 "direction": direction_label(opp.direction),
                                 "qty": opp.qty,
-                                "net_edge_cents": opp.net_edge_cents
+                                "gross_edge_cents": opp.gross_edge_cents,
+                                "net_edge_cents": opp.net_edge_cents,
+                                "reason": &opp.reason,
+                                "legs": legs_json(&opp)
                             }),
-                        );
+                        ).await;
                     }
-                    continue;
-                }
 
-                if last_balance_ok.is_some_and(|t| t.elapsed() > Duration::from_secs(120)) {
-                    warn!(
-                        "Skipping execution for {}: balance heartbeat stale",
-                        opp.group_event_ticker
-                    );
-                    write_trade_event(
-                        &mut trade_journal,
-                        json!({
-                            "ts": now_iso(),
-                            "kind": "execution_skip",
-                            "reason": "balance_heartbeat_stale",
-                            "fingerprint": fingerprint,
-                            "event_ticker": &opp.group_event_ticker
-                        }),
-                    );
-                    continue;
-                }
+                    if is_dry_run {
+                        if is_new {
+                            info!("Dry-run: skipping execution.");
+                            write_trade_event(
+                                &strat_journal,
+                                json!({
+                                    "ts": now_iso(),
+                                    "kind": "dry_run_skip",
+                                    "fingerprint": fingerprint,
+                                    "event_ticker": &opp.group_event_ticker,
+                                    "direction": direction_label(opp.direction),
+                                    "qty": opp.qty,
+                                    "net_edge_cents": opp.net_edge_cents
+                                }),
+                            ).await;
+                        }
+                        continue;
+                    }
 
-                let projected_entry_debit = match estimate_entry_debit_cents(&opp, &fees) {
-                    Some(v) => v,
-                    None => {
+                    if last_balance_ok.is_some_and(|t| t.elapsed() > Duration::from_secs(120)) {
                         warn!(
-                            "Skipping execution for {}: unable to estimate entry debit",
+                            "Skipping execution for {}: balance heartbeat stale",
                             opp.group_event_ticker
                         );
                         write_trade_event(
-                            &mut trade_journal,
+                            &strat_journal,
                             json!({
                                 "ts": now_iso(),
                                 "kind": "execution_skip",
-                                "reason": "entry_debit_estimate_failed",
+                                "reason": "balance_heartbeat_stale",
                                 "fingerprint": fingerprint,
-                                "event_ticker": &opp.group_event_ticker,
+                                "event_ticker": &opp.group_event_ticker
                             }),
-                        );
+                        ).await;
                         continue;
                     }
-                };
 
-                // Risk check.
-                if let Err(e) = risk.check(&opp, projected_entry_debit) {
-                    warn!("Risk Rejected: {}", e);
-                    risk_rejects_since_heartbeat = risk_rejects_since_heartbeat.saturating_add(1);
+                    let projected_entry_debit = match estimate_entry_debit_cents(&opp, &fees) {
+                        Some(v) => v,
+                        None => {
+                            warn!(
+                                "Skipping execution for {}: unable to estimate entry debit",
+                                opp.group_event_ticker
+                            );
+                            write_trade_event(
+                                &strat_journal,
+                                json!({
+                                    "ts": now_iso(),
+                                    "kind": "execution_skip",
+                                    "reason": "entry_debit_estimate_failed",
+                                    "fingerprint": fingerprint,
+                                    "event_ticker": &opp.group_event_ticker,
+                                }),
+                            ).await;
+                            continue;
+                        }
+                    };
+
+                    // Risk check.
+                    if let Err(e) = risk.check(&opp, projected_entry_debit) {
+                        warn!("Risk Rejected: {}", e);
+                        risk_rejects_since_heartbeat = risk_rejects_since_heartbeat.saturating_add(1);
+                        write_trade_event(
+                            &strat_journal,
+                            json!({
+                                "ts": now_iso(),
+                                "kind": "risk_rejected",
+                                "fingerprint": fingerprint,
+                                "event_ticker": &opp.group_event_ticker,
+                                "projected_entry_debit_cents": projected_entry_debit,
+                                "error": e.to_string()
+                            }),
+                        ).await;
+                        continue;
+                    }
+
+                    // Avoid cancellation of in-flight order flows; let the executor
+                    // finish and reconcile any partial fills.
+                    let exec_started = Instant::now();
+                    execution_attempts_since_heartbeat =
+                        execution_attempts_since_heartbeat.saturating_add(1);
                     write_trade_event(
-                        &mut trade_journal,
+                        &strat_journal,
                         json!({
                             "ts": now_iso(),
-                            "kind": "risk_rejected",
+                            "kind": "execution_start",
                             "fingerprint": fingerprint,
                             "event_ticker": &opp.group_event_ticker,
-                            "projected_entry_debit_cents": projected_entry_debit,
-                            "error": e.to_string()
+                            "direction": direction_label(opp.direction),
+                            "qty": opp.qty,
+                            "legs": legs_json(&opp),
+                            "net_edge_cents": opp.net_edge_cents
                         }),
-                    );
-                    continue;
-                }
-
-                // Avoid cancellation of in-flight order flows; let the executor
-                // finish and reconcile any partial fills.
-                let exec_started = Instant::now();
-                execution_attempts_since_heartbeat =
-                    execution_attempts_since_heartbeat.saturating_add(1);
-                write_trade_event(
-                    &mut trade_journal,
-                    json!({
-                        "ts": now_iso(),
-                        "kind": "execution_start",
-                        "fingerprint": fingerprint,
-                        "event_ticker": &opp.group_event_ticker,
-                        "direction": direction_label(opp.direction),
-                        "qty": opp.qty,
-                        "legs": legs_json(&opp),
-                        "net_edge_cents": opp.net_edge_cents
-                    }),
-                );
-                let exec_result = exec.execute(&opp).await;
-                let exec_elapsed = exec_started.elapsed();
-                if exec_elapsed > Duration::from_secs(12) {
-                    warn!(
-                        "Execution for {} took {}ms",
-                        opp.group_event_ticker,
-                        exec_elapsed.as_millis()
-                    );
-                }
-                write_trade_event(
-                    &mut trade_journal,
-                    json!({
-                        "ts": now_iso(),
-                        "kind": "execution_result",
-                        "fingerprint": fingerprint,
-                        "event_ticker": &opp.group_event_ticker,
-                        "result": outcome_label(exec_result),
-                        "elapsed_ms": exec_elapsed.as_millis() as u64,
-                        "net_edge_cents": opp.net_edge_cents
-                    }),
-                );
-
-                // Update risk only when exposure may persist.
-                match exec_result {
-                    ExecutionOutcome::CompleteFill => {
-                        risk.record_execution(&opp);
-                        risk.clear_critical_failures();
-                    }
-                    ExecutionOutcome::PartialFillUnwindFailed => {
-                        error!(
-                            "Execution for {} had partial fill with unwind failure; recording conservative exposure",
-                            opp.group_event_ticker
+                    ).await;
+                    let exec_result = exec.execute(&opp).await;
+                    let exec_elapsed = exec_started.elapsed();
+                    if exec_elapsed > Duration::from_secs(12) {
+                        warn!(
+                            "Execution for {} took {}ms",
+                            opp.group_event_ticker,
+                            exec_elapsed.as_millis()
                         );
-                        execution_failures_since_heartbeat =
-                            execution_failures_since_heartbeat.saturating_add(1);
-                        risk.record_execution(&opp);
-                        if let Err(e) = risk.record_critical_failure(&format!(
-                            "{} partial-fill unwind failure",
-                            opp.group_event_ticker
-                        )) {
-                            error!("{}", e);
-                            write_trade_event(
-                                &mut trade_journal,
-                                json!({
-                                    "ts": now_iso(),
-                                    "kind": "risk_kill_switch",
-                                    "reason": "partial_fill_unwind_failed",
-                                    "event_ticker": &opp.group_event_ticker,
-                                    "error": e.to_string()
-                                }),
-                            );
-                            return;
+                    }
+                    write_trade_event(
+                        &strat_journal,
+                        json!({
+                            "ts": now_iso(),
+                            "kind": "execution_result",
+                            "fingerprint": fingerprint,
+                            "event_ticker": &opp.group_event_ticker,
+                            "result": outcome_label(exec_result),
+                            "elapsed_ms": exec_elapsed.as_millis() as u64,
+                            "net_edge_cents": opp.net_edge_cents
+                        }),
+                    ).await;
+
+                    // Update risk only when exposure may persist.
+                    match exec_result {
+                        ExecutionOutcome::CompleteFill => {
+                            risk.record_execution(&opp);
+                            risk.clear_critical_failures();
                         }
-                    }
-                    ExecutionOutcome::PartialFillUnwound => {
-                        warn!(
-                            "Execution for {} was partially filled but unwind completed",
-                            opp.group_event_ticker
-                        );
-                        risk.clear_critical_failures();
-                    }
-                    ExecutionOutcome::NoFill => {
-                        debug!("Execution for {} had no fill", opp.group_event_ticker);
-                        risk.clear_critical_failures();
-                    }
-                    ExecutionOutcome::Rejected => {
-                        warn!(
-                            "Execution for {} rejected by pre-trade validation",
-                            opp.group_event_ticker
-                        );
-                        risk.clear_critical_failures();
-                    }
-                    ExecutionOutcome::Failed => {
-                        error!("Execution for {} failed", opp.group_event_ticker);
-                        execution_failures_since_heartbeat =
-                            execution_failures_since_heartbeat.saturating_add(1);
-                        if let Err(e) = risk.record_critical_failure(&format!(
-                            "{} execution failed",
-                            opp.group_event_ticker
-                        )) {
-                            error!("{}", e);
-                            write_trade_event(
-                                &mut trade_journal,
-                                json!({
-                                    "ts": now_iso(),
-                                    "kind": "risk_kill_switch",
-                                    "reason": "execution_failed_threshold",
-                                    "event_ticker": &opp.group_event_ticker,
-                                    "error": e.to_string()
-                                }),
+                        ExecutionOutcome::PartialFillUnwindFailed => {
+                            error!(
+                                "Execution for {} had partial fill with unwind failure; recording conservative exposure",
+                                opp.group_event_ticker
                             );
-                            return;
+                            execution_failures_since_heartbeat =
+                                execution_failures_since_heartbeat.saturating_add(1);
+                            risk.record_execution(&opp);
+                            if let Err(e) = risk.record_critical_failure(&format!(
+                                "{} partial-fill unwind failure",
+                                opp.group_event_ticker
+                            )) {
+                                error!("{}", e);
+                                write_trade_event(
+                                    &strat_journal,
+                                    json!({
+                                        "ts": now_iso(),
+                                        "kind": "risk_kill_switch",
+                                        "reason": "partial_fill_unwind_failed",
+                                        "event_ticker": &opp.group_event_ticker,
+                                        "error": e.to_string()
+                                    }),
+                                ).await;
+                                return;
+                            }
+                        }
+                        ExecutionOutcome::PartialFillUnwound => {
+                            warn!(
+                                "Execution for {} was partially filled but unwind completed",
+                                opp.group_event_ticker
+                            );
+                            risk.clear_critical_failures();
+                        }
+                        ExecutionOutcome::NoFill => {
+                            debug!("Execution for {} had no fill", opp.group_event_ticker);
+                            risk.clear_critical_failures();
+                        }
+                        ExecutionOutcome::Rejected => {
+                            warn!(
+                                "Execution for {} rejected by pre-trade validation",
+                                opp.group_event_ticker
+                            );
+                            risk.clear_critical_failures();
+                        }
+                        ExecutionOutcome::Failed => {
+                            error!("Execution for {} failed", opp.group_event_ticker);
+                            execution_failures_since_heartbeat =
+                                execution_failures_since_heartbeat.saturating_add(1);
+                            if let Err(e) = risk.record_critical_failure(&format!(
+                                "{} execution failed",
+                                opp.group_event_ticker
+                            )) {
+                                error!("{}", e);
+                                write_trade_event(
+                                    &strat_journal,
+                                    json!({
+                                        "ts": now_iso(),
+                                        "kind": "risk_kill_switch",
+                                        "reason": "execution_failed",
+                                        "event_ticker": &opp.group_event_ticker,
+                                        "error": e.to_string()
+                                    }),
+                                ).await;
+                                return;
+                            }
                         }
                     }
                 }
             }
-        }
 
-        if cli.dry_run {
-            if new_opp_count == 0 && !current_cycle_opps.is_empty() {
-                debug!(
-                    "Dry-run: {} opportunities unchanged from previous scan",
-                    current_cycle_opps.len()
-                );
-            } else if current_cycle_opps.is_empty() {
-                debug!("Dry-run: no opportunities this scan");
+            if is_dry_run {
+                if new_opp_count == 0 && !current_cycle_opps.is_empty() {
+                    debug!(
+                        "Dry-run: {} opportunities unchanged from previous scan",
+                        current_cycle_opps.len()
+                    );
+                } else if current_cycle_opps.is_empty() {
+                    debug!("Dry-run: no opportunities this scan");
+                }
             }
+
+            if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+                let tracked_tickers = strat_tickers.read().await.len();
+                let cached_quotes = quote_book.inner().read().await.len();
+                info!(
+                    "HEARTBEAT: cycles={} groups={} active_opps={} tickers={} quotes={} new_opps={} exec_attempts={} risk_rejects={} exec_failures={}",
+                    cycles_since_heartbeat,
+                    group_count,
+                    current_cycle_opps.len(),
+                    tracked_tickers,
+                    cached_quotes,
+                    new_opps_since_heartbeat,
+                    execution_attempts_since_heartbeat,
+                    risk_rejects_since_heartbeat,
+                    execution_failures_since_heartbeat
+                );
+                write_trade_event(
+                    &strat_journal,
+                    json!({
+                        "ts": now_iso(),
+                        "kind": "heartbeat",
+                        "mode": if is_dry_run { "dry_run" } else { "live" },
+                        "cycles": cycles_since_heartbeat,
+                        "groups": group_count,
+                        "active_opportunities": current_cycle_opps.len(),
+                        "tracked_tickers": tracked_tickers,
+                        "cached_quotes": cached_quotes,
+                        "new_opportunities": new_opps_since_heartbeat,
+                        "execution_attempts": execution_attempts_since_heartbeat,
+                        "risk_rejections": risk_rejects_since_heartbeat,
+                        "execution_failures": execution_failures_since_heartbeat
+                    }),
+                ).await;
+                last_heartbeat = Instant::now();
+                cycles_since_heartbeat = 0;
+                new_opps_since_heartbeat = 0;
+                execution_attempts_since_heartbeat = 0;
+                risk_rejects_since_heartbeat = 0;
+                execution_failures_since_heartbeat = 0;
+            }
+
+            prev_cycle_opps = current_cycle_opps;
+
+            sleep(Duration::from_millis(strat_cfg.timing.eval_interval_ms)).await;
         }
+    });
 
-        if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
-            let tracked_tickers = tickers_to_track.read().await.len();
-            let cached_quotes = quote_book.inner().read().await.len();
-            info!(
-                "HEARTBEAT: cycles={} groups={} active_opps={} tickers={} quotes={} new_opps={} exec_attempts={} risk_rejects={} exec_failures={}",
-                cycles_since_heartbeat,
-                group_count,
-                current_cycle_opps.len(),
-                tracked_tickers,
-                cached_quotes,
-                new_opps_since_heartbeat,
-                execution_attempts_since_heartbeat,
-                risk_rejects_since_heartbeat,
-                execution_failures_since_heartbeat
-            );
-            write_trade_event(
-                &mut trade_journal,
-                json!({
-                    "ts": now_iso(),
-                    "kind": "heartbeat",
-                    "mode": if cli.dry_run { "dry_run" } else { "live" },
-                    "cycles": cycles_since_heartbeat,
-                    "groups": group_count,
-                    "active_opportunities": current_cycle_opps.len(),
-                    "tracked_tickers": tracked_tickers,
-                    "cached_quotes": cached_quotes,
-                    "new_opportunities": new_opps_since_heartbeat,
-                    "execution_attempts": execution_attempts_since_heartbeat,
-                    "risk_rejections": risk_rejects_since_heartbeat,
-                    "execution_failures": execution_failures_since_heartbeat
-                }),
-            );
-            last_heartbeat = Instant::now();
-            cycles_since_heartbeat = 0;
-            new_opps_since_heartbeat = 0;
-            execution_attempts_since_heartbeat = 0;
-            risk_rejects_since_heartbeat = 0;
-            execution_failures_since_heartbeat = 0;
+    info!("🚀 Arbitrage Bot is running. Press Ctrl+C to stop.");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            info!("Shutdown signal received");
         }
-
-        prev_cycle_opps = current_cycle_opps;
-
-        sleep(Duration::from_millis(cfg.timing.eval_interval_ms)).await;
+        _ = strategy_handle => {
+            error!("Strategy loop exited unexpectedly");
+        }
     }
 }

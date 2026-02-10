@@ -15,6 +15,7 @@ use std::{
     hash::{Hash, Hasher},
     io::Write,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use arb_strategy::{
@@ -25,7 +26,7 @@ use chrono::{SecondsFormat, Utc};
 use clap::Parser;
 use kalshi_client::{new_price_cache, KalshiAuth, KalshiRestClient, KalshiWsClient, PriceEntry};
 use serde_json::json;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
@@ -42,6 +43,8 @@ struct Cli {
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const BOT_TRADE_DIR: &str = "arbitrage-bot";
+
+type SharedTradeJournal = Arc<Mutex<TradeJournal>>;
 
 fn opportunity_fingerprint(opp: &ArbOpportunity) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -204,8 +207,9 @@ impl TradeJournal {
     }
 }
 
-fn write_trade_event(journal: &mut TradeJournal, event: serde_json::Value) {
-    journal.write_event(event);
+async fn write_trade_event(journal: &SharedTradeJournal, event: serde_json::Value) {
+    let mut guard = journal.lock().await;
+    guard.write_event(event);
 }
 
 async fn fetch_balance_with_retry(
@@ -286,9 +290,12 @@ async fn main() {
             return;
         }
     };
-    info!("Trade journal path: {}", trade_journal.dir().display());
+    let journal_dir = trade_journal.dir().to_path_buf();
+    let trade_journal = Arc::new(Mutex::new(trade_journal));
+
+    info!("Trade journal path: {}", journal_dir.display());
     write_trade_event(
-        &mut trade_journal,
+        &trade_journal,
         json!({
             "ts": now_iso(),
             "kind": "bot_start",
@@ -309,7 +316,7 @@ async fn main() {
                 "universe_refresh_secs": cfg.timing.universe_refresh_secs
             }
         }),
-    );
+    ).await;
 
     let auth = match KalshiAuth::new(&cfg.api_key, &cfg.secret_key) {
         Ok(a) => a,
@@ -327,26 +334,28 @@ async fn main() {
             Ok(bal) => {
                 info!("✅ Auth valid. Balance: {}¢", bal);
                 write_trade_event(
-                    &mut trade_journal,
+                    &trade_journal,
                     json!({
                         "ts": now_iso(),
                         "kind": "auth_check",
                         "status": "ok",
                         "balance_cents": bal
                     }),
-                );
+                )
+                .await;
             }
             Err(e) => {
                 error!("❌ Auth failed: {}", e);
                 write_trade_event(
-                    &mut trade_journal,
+                    &trade_journal,
                     json!({
                         "ts": now_iso(),
                         "kind": "auth_check",
                         "status": "error",
                         "error": e.to_string()
                     }),
-                );
+                )
+                .await;
             }
         }
         return;

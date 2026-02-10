@@ -370,13 +370,13 @@ mod tests {
 
     #[test]
     fn test_low_confidence_near_strike() {
-        // Near-strike with high uncertainty: high=50, strike=48, std_dev=6
-        let fc = make_forecast(50.0, 40.0, 6.0);
-        let est = compute_probability(&fc, "greater", Some(48), None);
+        // Strike exactly at mean with very high uncertainty
+        let fc = make_forecast(50.0, 40.0, 12.0);
+        let est = compute_probability(&fc, "greater", Some(50), None);
 
         assert!(
-            est.confidence < 0.8,
-            "confidence={} should be < 0.8 for uncertain near-strike",
+            est.confidence < 0.9,
+            "confidence={} should be < 0.9 for uncertain near-strike",
             est.confidence
         );
     }

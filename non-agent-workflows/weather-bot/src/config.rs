@@ -35,6 +35,9 @@ fn validate_config(config: &BotConfig) -> Result<(), Error> {
     if config.strategy.min_hours_before_close < 0.0 {
         issues.push("strategy.min_hours_before_close must be >= 0".into());
     }
+    if config.strategy.max_days_to_resolution <= 0 {
+        issues.push("strategy.max_days_to_resolution must be > 0".into());
+    }
 
     if config.risk.max_position_cents <= 0 {
         issues.push("risk.max_position_cents must be > 0".into());
@@ -115,6 +118,30 @@ pub fn load_config() -> Result<BotConfig, Error> {
     }
     if let Ok(demo) = std::env::var("USE_DEMO") {
         config.use_demo = demo != "0" && demo.to_lowercase() != "false";
+    }
+    if let Ok(days) = std::env::var("WEATHER_MAX_DAYS_TO_RESOLUTION") {
+        let parsed = days.trim().parse::<i64>().map_err(|_| {
+            Error::Config("WEATHER_MAX_DAYS_TO_RESOLUTION must be an integer > 0".into())
+        })?;
+        if parsed <= 0 {
+            return Err(Error::Config(
+                "WEATHER_MAX_DAYS_TO_RESOLUTION must be an integer > 0".into(),
+            ));
+        }
+        config.strategy.max_days_to_resolution = parsed;
+    }
+    if let Ok(max_pos) = std::env::var("WEATHER_MAX_POSITION_CENTS") {
+        let parsed = max_pos.trim().parse::<i64>().map_err(|_| {
+            Error::Config("WEATHER_MAX_POSITION_CENTS must be an integer > 0".into())
+        })?;
+        if parsed <= 0 {
+            return Err(Error::Config(
+                "WEATHER_MAX_POSITION_CENTS must be an integer > 0".into(),
+            ));
+        }
+        // Keep Kelly sizing logic, but enforce a lower cap for both strategy and risk.
+        config.strategy.max_position_cents = parsed;
+        config.risk.max_position_cents = parsed;
     }
 
     // 5. Validate required fields.

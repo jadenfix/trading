@@ -7,6 +7,8 @@ WEATHER_DIR="$ROOT_DIR/non-agent-workflows/weather-bot"
 TRADES_DIR="${TRADES_DIR:-$ROOT_DIR/TRADES}"
 MODE="${1:-prod}"
 ARB_MAX_DAYS_TO_RESOLUTION=11
+WEATHER_MAX_DAYS_TO_RESOLUTION=11
+WEATHER_MAX_POSITION_CENTS=400
 LOCK_DIR="$ROOT_DIR/.run-bots.lock"
 LOCK_OWNED=0
 
@@ -27,6 +29,8 @@ Optional environment variables:
 
 Behavior:
   Arbitrage bot is forced to short-term discovery with ARB_MAX_DAYS_TO_RESOLUTION=11
+  Weather bot is forced to short-term discovery with WEATHER_MAX_DAYS_TO_RESOLUTION=11
+  Weather Kelly sizing cap is reduced to $4 with WEATHER_MAX_POSITION_CENTS=400
 EOF
 }
 
@@ -49,6 +53,8 @@ mkdir -p "$TRADES_DIR"
 export TRADES_DIR
 export USE_DEMO="${USE_DEMO:-0}"
 export ARB_MAX_DAYS_TO_RESOLUTION
+export WEATHER_MAX_DAYS_TO_RESOLUTION
+export WEATHER_MAX_POSITION_CENTS
 
 if [[ "${ALLOW_MULTI:-0}" != "1" ]]; then
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
@@ -98,6 +104,8 @@ echo "  MODE=$MODE"
 echo "  USE_DEMO=$USE_DEMO"
 echo "  TRADES_DIR=$TRADES_DIR"
 echo "  ARB_MAX_DAYS_TO_RESOLUTION=$ARB_MAX_DAYS_TO_RESOLUTION"
+echo "  WEATHER_MAX_DAYS_TO_RESOLUTION=$WEATHER_MAX_DAYS_TO_RESOLUTION"
+echo "  WEATHER_MAX_POSITION_CENTS=$WEATHER_MAX_POSITION_CENTS"
 
 cleanup() {
   local code=$?

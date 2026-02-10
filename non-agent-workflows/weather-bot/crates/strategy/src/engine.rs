@@ -127,7 +127,7 @@ impl StrategyEngine {
             {
                 // Calculate position size (limit to max_position).
                 let max_contracts = strat.max_position_cents / price.yes_ask;
-                let count = max_contracts.max(1).min(10);
+                let count = max_contracts.clamp(1, 10);
 
                 info!(
                     "ENTRY: {} — BUY YES @ {}¢ x{} (fair={}¢, edge={}¢, p_yes={:.3})",

@@ -138,7 +138,7 @@ impl KalshiWsClient {
                 .map_err(|e| common::Error::WebSocket(e.to_string()))?;
 
             write
-                .send(tungstenite::Message::Text(sub_json.into()))
+                .send(tungstenite::Message::Text(sub_json))
                 .await
                 .map_err(|e| common::Error::WebSocket(e.to_string()))?;
 

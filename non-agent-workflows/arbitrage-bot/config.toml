@@ -22,6 +22,8 @@ tie_buffer_cents = 5
 min_leg_size = 5
 # Default quantity per arb leg
 default_qty = 10
+# Only evaluate events resolving in less than this many days
+max_days_to_resolution = 11
 
 [timing]
 # Universe (event/market) refresh interval in seconds

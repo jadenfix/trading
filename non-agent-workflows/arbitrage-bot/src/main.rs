@@ -263,12 +263,13 @@ async fn main() {
         if cfg.use_demo { "DEMO" } else { "PRODUCTION" }
     );
     info!(
-        "Arb config: min_profit={}¢ slippage={}¢ guaranteed_only={} strict_binary_only={} ev_mode={}",
+        "Arb config: min_profit={}¢ slippage={}¢ guaranteed_only={} strict_binary_only={} ev_mode={} max_days_to_resolution={}",
         cfg.arb.min_profit_cents,
         cfg.arb.slippage_buffer_cents,
         cfg.arb.guaranteed_arb_only,
         cfg.arb.strict_binary_only,
-        cfg.arb.ev_mode_enabled
+        cfg.arb.ev_mode_enabled,
+        cfg.arb.max_days_to_resolution
     );
     if cfg.timing.quote_stale_secs < 10 {
         warn!(
@@ -299,7 +300,8 @@ async fn main() {
                 "guaranteed_arb_only": cfg.arb.guaranteed_arb_only,
                 "strict_binary_only": cfg.arb.strict_binary_only,
                 "ev_mode_enabled": cfg.arb.ev_mode_enabled,
-                "default_qty": cfg.arb.default_qty
+                "default_qty": cfg.arb.default_qty,
+                "max_days_to_resolution": cfg.arb.max_days_to_resolution
             },
             "timing": {
                 "eval_interval_ms": cfg.timing.eval_interval_ms,
@@ -371,10 +373,11 @@ async fn main() {
     let disc_tickers = tickers_to_track.clone();
     let disc_price_cache = price_cache.clone();
     let refresh_secs = cfg.timing.universe_refresh_secs;
+    let max_days_to_resolution = cfg.arb.max_days_to_resolution;
 
     tokio::spawn(async move {
         loop {
-            let groups = UniverseBuilder::build(&disc_client).await;
+            let groups = UniverseBuilder::build(&disc_client, max_days_to_resolution).await;
 
             // Collect all unique tickers to update WS subscription.
             let mut all_tickers = Vec::new();

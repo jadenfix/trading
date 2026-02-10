@@ -56,10 +56,15 @@ pub fn compute_probability(
     let p_yes_low = p_variant_a.min(p_variant_b);
     let p_yes_high = p_variant_a.max(p_variant_b);
 
-    // Confidence: inverse of the bound spread, normalized.
-    // A spread of 0 → confidence 1.0; spread of 0.5+ → confidence ~0.0.
+    // Confidence metric: combines two factors:
+    // 1. How far p_yes is from 0.5 (distance-to-strike signal strength).
+    //    At p=0.5, the outcome is maximally uncertain → low confidence.
+    //    At p=0.95 or p=0.05, the signal is strong → high confidence.
+    // 2. The spread between optimistic/pessimistic bounds.
+    let distance_from_uncertain = (2.0 * (p_yes - 0.5)).abs(); // 0.0 at p=0.5, 1.0 at p=0/1
     let spread = (p_yes_high - p_yes_low).max(0.0);
-    let confidence = (1.0 - 2.0 * spread).clamp(0.0, 1.0);
+    let spread_penalty = (1.0 - 4.0 * spread).clamp(0.0, 1.0);
+    let confidence = (distance_from_uncertain * spread_penalty).clamp(0.0, 1.0);
 
     ProbabilityEstimate {
         p_yes,

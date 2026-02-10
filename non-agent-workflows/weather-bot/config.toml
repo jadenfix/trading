@@ -19,10 +19,11 @@ entry_threshold_cents = 15      # Buy YES when ask ≤ this
 exit_threshold_cents = 45       # Sell YES when bid ≥ this
 edge_threshold_cents = 5        # Min fair-ask spread to enter
 safety_margin_cents = 3         # Subtracted from fair value
-max_position_cents = 500        # $5 max per market
+max_position_cents = 400        # $4 max per market (Kelly-capped)
 max_trades_per_run = 5          # Trades per evaluation cycle
 max_spread_cents = 10           # Skip markets with wider spreads
 min_hours_before_close = 2.0    # Don't trade near close
+max_days_to_resolution = 11     # Only track markets resolving in < 11 days
 
 [timing]
 scan_interval_secs = 120        # Strategy evaluation interval
@@ -32,7 +33,7 @@ price_stale_secs = 300          # Price data staleness (5 min)
 forecast_stale_secs = 3600      # Forecast staleness (1 hour)
 
 [risk]
-max_position_cents = 500        # $5 max per market
+max_position_cents = 400        # $4 max per market
 max_total_exposure_cents = 5000 # $50 total portfolio max
 max_city_exposure_cents = 1500  # $15 per city (correlated markets)
 max_daily_loss_cents = 2000     # $20 drawdown circuit-breaker

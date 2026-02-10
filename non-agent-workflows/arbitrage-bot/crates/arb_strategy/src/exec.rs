@@ -32,16 +32,16 @@ enum UnwindPolicy {
 }
 
 /// Executor engine.
-pub struct ArbExecutor<'a> {
-    client: &'a KalshiRestClient,
-    fees: &'a ArbFeeModel,
+pub struct ArbExecutor {
+    client: KalshiRestClient,
+    fees: ArbFeeModel,
     unwind_policy: UnwindPolicy,
 }
 
-impl<'a> ArbExecutor<'a> {
+impl ArbExecutor {
     pub fn new(
-        client: &'a KalshiRestClient,
-        fees: &'a ArbFeeModel,
+        client: &KalshiRestClient,
+        fees: &ArbFeeModel,
         execution: &ExecutionConfig,
     ) -> Self {
         let unwind_policy = if execution.unwind_policy.eq_ignore_ascii_case("cancel_only") {
@@ -51,8 +51,8 @@ impl<'a> ArbExecutor<'a> {
         };
 
         Self {
-            client,
-            fees,
+            client: client.clone(),
+            fees: fees.clone(),
             unwind_policy,
         }
     }
@@ -116,46 +116,65 @@ impl<'a> ArbExecutor<'a> {
                 order_type: OrderType::Limit,
                 yes_price,
                 no_price,
-                // TODO: Set expiration_ts for strict FOK if API supports it,
-                // currently using FOK simply by immediate cancel or reliance on fill.
-                // Kalshi "FOK" is a TimeInForce param but CreateOrderRequest struct
-                // in common might need update or we use correct parameter.
-                // For now, we use standard Limit orders and check fills immediately.
                 expiration_ts: None,
+                time_in_force: Some("fill_or_kill".into()),
             });
         }
 
         // 2. Submit batch.
-        // Note: The common crate CreateOrderRequest doesn't have `expiration_ts` nicely typed for FOK.
-        // We will assume `create_batch_orders` handles the raw request.
         info!("Sending batch of {} orders...", orders.len());
 
-        // This assumes KalshiRestClient has a `create_batch_orders` method (added in plan).
         match self.client.create_batch_orders(orders).await {
             Ok(responses) => {
-                // 3. Analyze fills.
-                let total_legs = responses.orders.len();
+                // 3. Unwrap BatchOrderEntry wrappers.
+                //    Log per-order errors and extract successful OrderInfo objects.
+                let mut successful_orders = Vec::new();
+                let mut errored_count = 0usize;
+
+                for entry in &responses.orders {
+                    if let Some(ref err) = entry.error {
+                        let coid = entry.client_order_id.as_deref().unwrap_or("?");
+                        error!(
+                            "Batch per-order error (client_order_id={}): code={:?} msg={:?}",
+                            coid, err.code, err.message
+                        );
+                        errored_count += 1;
+                        continue;
+                    }
+                    if let Some(ref order) = entry.order {
+                        successful_orders.push(order.clone());
+                    } else {
+                        // Neither order nor error — treat as error.
+                        warn!("Batch entry with no order and no error — skipping");
+                        errored_count += 1;
+                    }
+                }
+
+                if errored_count > 0 {
+                    warn!(
+                        "{} of {} batch entries had per-order errors",
+                        errored_count,
+                        responses.orders.len()
+                    );
+                }
+
+                let total_legs = successful_orders.len();
+                if total_legs == 0 && errored_count > 0 {
+                    error!("All batch orders failed with per-order errors");
+                    return ExecutionOutcome::Failed;
+                }
                 if total_legs == 0 {
                     error!("Batch returned zero order statuses");
                     return ExecutionOutcome::Failed;
                 }
-                if total_legs != opp.legs.len() {
-                    warn!(
-                        "Batch response leg mismatch: expected {} got {}",
-                        opp.legs.len(),
-                        total_legs
-                    );
-                }
 
-                let filled_orders: Vec<_> = responses
-                    .orders
+                let filled_orders: Vec<_> = successful_orders
                     .iter()
                     .filter(|o| o.status == "executed" || o.fill_count >= opp.qty)
                     .cloned()
                     .collect();
                 let filled_legs = filled_orders.len();
-                let open_orders: Vec<_> = responses
-                    .orders
+                let open_orders: Vec<_> = successful_orders
                     .iter()
                     .filter(|o| {
                         o.remaining_count > 0 && !Self::is_terminal_status(o.status.as_str())
@@ -285,14 +304,16 @@ impl<'a> ArbExecutor<'a> {
                     yes_price: None,
                     no_price: None,
                     expiration_ts: None,
+                    time_in_force: None, // Market orders don't need TIF
                 };
 
                 // Use batch endpoint so we can pass true Market order payload.
                 match self.client.create_batch_orders(vec![req.clone()]).await {
                     Ok(resp) => {
-                        let first = resp.orders.first();
-                        let status = first.map(|o| o.status.as_str()).unwrap_or("unknown");
-                        let fill_count = first.map(|o| o.fill_count).unwrap_or(0);
+                        let first_order = resp.orders.first()
+                            .and_then(|entry| entry.order.as_ref());
+                        let status = first_order.map(|o| o.status.as_str()).unwrap_or("unknown");
+                        let fill_count = first_order.map(|o| o.fill_count).unwrap_or(0);
                         if fill_count >= req.count || status == "executed" {
                             warn!("Unwound {} x {} (status={})", req.ticker, req.count, status);
                             unwound = true;

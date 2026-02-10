@@ -91,6 +91,10 @@ pub struct StrategyConfig {
     /// Minimum hours before market close to trade.
     #[serde(default = "default_min_hours")]
     pub min_hours_before_close: f64,
+
+    /// Only include markets resolving in fewer than this many days.
+    #[serde(default = "default_max_days_to_resolution")]
+    pub max_days_to_resolution: i64,
 }
 
 /// Risk management thresholds.
@@ -174,6 +178,9 @@ fn default_max_spread() -> i64 {
 }
 fn default_min_hours() -> f64 {
     2.0
+}
+fn default_max_days_to_resolution() -> i64 {
+    11
 }
 
 fn default_max_total_exposure() -> i64 {
@@ -279,6 +286,7 @@ impl Default for StrategyConfig {
             max_trades_per_run: default_max_trades(),
             max_spread_cents: default_max_spread(),
             min_hours_before_close: default_min_hours(),
+            max_days_to_resolution: default_max_days_to_resolution(),
         }
     }
 }

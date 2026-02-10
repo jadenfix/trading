@@ -80,10 +80,7 @@ impl UniverseBuilder {
             let open_markets: Vec<MarketInfo> = event
                 .markets
                 .iter()
-                .filter(|m| {
-                    (m.status == "active" || m.status == "open")
-                        && Self::resolves_within_window(m, now, max_days_to_resolution)
-                })
+                .filter(|m| Self::is_open_market_in_window(m, now, max_days_to_resolution))
                 .cloned()
                 .collect();
 
@@ -152,6 +149,15 @@ impl UniverseBuilder {
 
         let time_remaining = resolution_time - now;
         time_remaining > Duration::zero() && time_remaining < Duration::days(max_days_to_resolution)
+    }
+
+    fn is_open_market_in_window(
+        market: &MarketInfo,
+        now: DateTime<Utc>,
+        max_days_to_resolution: i64,
+    ) -> bool {
+        (market.status == "active" || market.status == "open")
+            && Self::resolves_within_window(market, now, max_days_to_resolution)
     }
 
     /// Fetch events from Kalshi API with pagination.
@@ -393,5 +399,26 @@ mod tests {
         let now = Utc::now();
 
         assert!(!UniverseBuilder::resolves_within_window(&market, now, 11));
+    }
+
+    #[test]
+    fn test_open_market_filter_keeps_only_short_term() {
+        let now = Utc::now();
+
+        let mut short_term = make_market("SHORT", "Short term");
+        short_term.status = "open".into();
+        short_term.close_time = Some(now + Duration::days(3));
+
+        let mut long_term = make_market("LONG", "Long term");
+        long_term.status = "open".into();
+        long_term.close_time = Some(now + Duration::days(20));
+
+        let mut not_open = make_market("CLOSED", "Closed");
+        not_open.status = "closed".into();
+        not_open.close_time = Some(now + Duration::days(2));
+
+        assert!(UniverseBuilder::is_open_market_in_window(&short_term, now, 11));
+        assert!(!UniverseBuilder::is_open_market_in_window(&long_term, now, 11));
+        assert!(!UniverseBuilder::is_open_market_in_window(&not_open, now, 11));
     }
 }

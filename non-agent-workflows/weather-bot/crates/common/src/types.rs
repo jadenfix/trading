@@ -140,8 +140,10 @@ impl FeeSchedule {
     fn fee_cents(&self, coeff: f64, count: i64, price_cents: i64) -> i64 {
         let p = price_cents as f64 / 100.0;
         let fee_dollars = coeff * (count as f64) * p * (1.0 - p);
-        // Round up to next cent → convert to cents and ceil.
-        (fee_dollars * 100.0).ceil() as i64
+        // Round up to next cent. Use a small epsilon to avoid floating-point
+        // precision issues (e.g., $1.75 being represented as $1.7500000000000002).
+        let fee_cents = fee_dollars * 100.0;
+        (fee_cents - 1e-9).ceil().max(0.0) as i64
     }
 }
 

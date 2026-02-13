@@ -91,7 +91,14 @@ run_tests() {
 }
 
 run_bots() {
-  local mode="${1:-prod}"
+  local mode="${1:-}"
+
+  if [[ -z "$mode" ]]; then
+    echo "Missing bots mode. Choose one of: prod | dry-run | check-auth" >&2
+    usage
+    exit 1
+  fi
+
   case "$mode" in
     prod|dry-run|check-auth) ;;
     *)
@@ -113,7 +120,7 @@ main() {
       run_tests "${1:-all}"
       ;;
     bots)
-      run_bots "${1:-prod}"
+      run_bots "${1:-}"
       ;;
     help|-h|--help)
       usage

@@ -27,4 +27,4 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run unified test command
-        run: ./trading-cli test
+        run: bash ./trading-cli test

@@ -8,7 +8,7 @@ This repository contains algorithmic trading bots for the Kalshi prediction mark
   - `libs/kalshi_client`: Wrapper for Kalshi API (REST + WebSocket).
   - `libs/common`: Shared domain types, error handling, and configuration utilities.
 
-- **`weather-bot/`**: A bot that trades weather markets based on NOAA forecasts.
+- **`weather-bot/`**: A bot that trades weather markets based on NOAA forecasts (optionally blended with Google Weather API).
   - Uses `libs/kalshi_client` and `libs/common`.
   - logic in `crates/strategy` and `crates/noaa_client`.
 

@@ -1,6 +1,7 @@
 # Weather Bot — Default Configuration
 # Override with environment variables or .env file.
 # KALSHI_API_KEY and KALSHI_SECRET_KEY must be set in .env or environment.
+# Optional: GOOGLE_WEATHER_API_KEY (required here because quality.require_both_sources = true).
 
 # Use demo environment (set to false for production)
 use_demo = true
@@ -20,7 +21,7 @@ exit_threshold_cents = 45       # Sell YES when bid ≥ this
 edge_threshold_cents = 5        # Min fair-ask spread to enter
 safety_margin_cents = 3         # Subtracted from fair value
 max_position_cents = 400        # $4 max per market (Kelly-capped)
-max_trades_per_run = 5          # Trades per evaluation cycle
+max_trades_per_run = 0          # 0 = no hard cap (quality filters decide)
 max_spread_cents = 10           # Skip markets with wider spreads
 min_hours_before_close = 2.0    # Don't trade near close
 max_days_to_resolution = 11     # Only track markets resolving in < 11 days
@@ -31,6 +32,24 @@ forecast_interval_secs = 1800   # Forecast refresh (30 min)
 discovery_interval_secs = 1800  # Market discovery refresh
 price_stale_secs = 300          # Price data staleness (5 min)
 forecast_stale_secs = 3600      # Forecast staleness (1 hour)
+
+[weather_sources]
+noaa_weight = 0.5               # Relative weight for NOAA
+google_weight = 0.5             # Relative weight for Google Weather
+
+[quality]
+mode = "ultra_safe"
+strict_source_veto = true
+require_both_sources = true
+max_source_prob_gap = 0.08
+min_source_confidence = 0.65
+min_ensemble_confidence = 0.75
+min_conservative_net_edge_cents = 8
+min_conservative_ev_cents = 4
+min_volume_24h = 50
+min_open_interest = 25
+slippage_buffer_cents = 1
+max_spread_cents_ultra = 6
 
 [risk]
 max_position_cents = 400        # $4 max per market

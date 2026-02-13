@@ -20,12 +20,13 @@ use std::{
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use clap::Parser;
+use google_weather_client::GoogleWeatherClient;
 use serde_json::json;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
-use common::config::BotConfig;
+use common::{config::BotConfig, ForecastData};
 use kalshi_client::{new_price_cache, KalshiAuth, KalshiRestClient, KalshiWsClient};
 use noaa_client::NoaaClient;
 use strategy::{new_forecast_cache, ForecastEntry, RiskManager, StrategyEngine};
@@ -171,7 +172,7 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "weather_bot=info,kalshi_client=info,noaa_client=info,strategy=info".into()
+                "weather_bot=info,kalshi_client=info,noaa_client=info,google_weather_client=info,strategy=info".into()
             }),
         )
         .with_target(true)
@@ -215,6 +216,19 @@ async fn main() {
         "Fees: taker={:.2}%, maker={:.4}%",
         0.07 * 100.0,
         0.0175 * 100.0
+    );
+    info!(
+        "Weather sources: NOAA={:.2}, Google={:.2}",
+        cfg.weather_sources.noaa_weight, cfg.weather_sources.google_weight
+    );
+    info!(
+        "Quality: mode={:?}, strict_veto={}, require_both={}, gap<= {:.3}, conf(src/ens)>=({:.2}/{:.2})",
+        cfg.quality.mode,
+        cfg.quality.strict_source_veto,
+        cfg.quality.require_both_sources,
+        cfg.quality.max_source_prob_gap,
+        cfg.quality.min_source_confidence,
+        cfg.quality.min_ensemble_confidence
     );
 
     let trades_dir = resolve_trades_dir();
@@ -323,6 +337,11 @@ async fn main() {
         Arc::new(RwLock::new(HashMap::new()));
 
     let noaa = NoaaClient::new();
+    let google = if cfg.weather_sources.google_weight > 0.0 || cfg.quality.require_both_sources {
+        Some(GoogleWeatherClient::new(cfg.google_weather_api_key.clone()))
+    } else {
+        None
+    };
     let strategy = StrategyEngine::new(cfg.clone());
     let _risk_mgr = RiskManager::new(cfg.risk.clone());
 
@@ -330,7 +349,7 @@ async fn main() {
     if cli.dry_run {
         info!("Running single dry-run evaluation...");
         run_discovery(&rest_client, &cfg, &tracked_tickers, &tracked_markets).await;
-        run_forecast_update(&noaa, &cfg, &forecast_cache).await;
+        run_forecast_update(&noaa, google.as_ref(), &cfg, &forecast_cache).await;
 
         let tickers = tracked_tickers.read().await.clone();
         info!("Discovered {} tickers", tickers.len());
@@ -339,10 +358,13 @@ async fn main() {
         let prices = price_cache.read().await.clone();
         let positions = HashMap::new();
 
-        let intents = strategy.evaluate(&markets, &prices, &forecast_cache, &positions);
+        let evaluation =
+            strategy.evaluate_with_diagnostics(&markets, &prices, &forecast_cache, &positions);
+        let intents = evaluation.intents;
         info!(
-            "Strategy produced {} intents (dry-run, not executing)",
-            intents.len()
+            "Strategy produced {} intents (dry-run, not executing), rejected {}",
+            intents.len(),
+            evaluation.rejected.len()
         );
         write_trade_event(
             &trade_journal,
@@ -353,10 +375,23 @@ async fn main() {
                 "markets": markets.len(),
                 "prices": prices.len(),
                 "forecasts": forecast_cache.len(),
-                "intents": intents.len()
+                "intents": intents.len(),
+                "signal_rejected": evaluation.rejected.len()
             }),
         )
         .await;
+        for rejected in &evaluation.rejected {
+            write_trade_event(
+                &trade_journal,
+                json!({
+                    "ts": now_iso(),
+                    "kind": "dry_run_rejected",
+                    "ticker": &rejected.ticker,
+                    "reason": &rejected.reason
+                }),
+            )
+            .await;
+        }
         for intent in &intents {
             info!(
                 "  → {} {} {} @ {}¢ x{} (fee≈{}¢, conf={:.2}) — {}",
@@ -431,12 +466,13 @@ async fn main() {
 
     // Task 3: Forecast Updates
     let fc_noaa = noaa.clone();
+    let fc_google = google.clone();
     let fc_cfg = cfg.clone();
     let fc_cache = forecast_cache.clone();
     let fc_journal = trade_journal.clone();
     let forecast_handle = tokio::spawn(async move {
         loop {
-            run_forecast_update(&fc_noaa, &fc_cfg, &fc_cache).await;
+            run_forecast_update(&fc_noaa, fc_google.as_ref(), &fc_cfg, &fc_cache).await;
             write_trade_event(
                 &fc_journal,
                 json!({
@@ -633,31 +669,144 @@ async fn run_discovery(
     *markets.write().await = new_map;
 }
 
-async fn run_forecast_update(noaa: &NoaaClient, cfg: &BotConfig, cache: &strategy::ForecastCache) {
+fn blend_forecasts(city_name: &str, weighted: &[(ForecastData, f64)]) -> ForecastData {
+    let total_weight = weighted
+        .iter()
+        .map(|(_, weight)| *weight)
+        .sum::<f64>()
+        .max(f64::EPSILON);
+    let normalize = |weight: f64| weight / total_weight;
+
+    let high_temp_f = weighted
+        .iter()
+        .map(|(forecast, weight)| forecast.high_temp_f * normalize(*weight))
+        .sum::<f64>();
+    let low_temp_f = weighted
+        .iter()
+        .map(|(forecast, weight)| forecast.low_temp_f * normalize(*weight))
+        .sum::<f64>();
+    let precip_prob = weighted
+        .iter()
+        .map(|(forecast, weight)| forecast.precip_prob * normalize(*weight))
+        .sum::<f64>()
+        .clamp(0.0, 1.0);
+
+    // Blend means + variances to account for both forecast uncertainty and source disagreement.
+    let blended_mean = weighted
+        .iter()
+        .map(|(forecast, weight)| {
+            let mean = (forecast.high_temp_f + forecast.low_temp_f) / 2.0;
+            mean * normalize(*weight)
+        })
+        .sum::<f64>();
+    let blended_second_moment = weighted
+        .iter()
+        .map(|(forecast, weight)| {
+            let mean = (forecast.high_temp_f + forecast.low_temp_f) / 2.0;
+            let variance = forecast.temp_std_dev.max(0.0).powi(2);
+            (variance + mean.powi(2)) * normalize(*weight)
+        })
+        .sum::<f64>();
+    let blended_variance = (blended_second_moment - blended_mean.powi(2)).max(0.0);
+    let temp_std_dev = blended_variance.sqrt().max(2.0);
+
+    ForecastData {
+        city: city_name.to_string(),
+        high_temp_f,
+        low_temp_f,
+        precip_prob,
+        temp_std_dev,
+        fetched_at: Utc::now(),
+    }
+}
+
+async fn run_forecast_update(
+    noaa: &NoaaClient,
+    google: Option<&GoogleWeatherClient>,
+    cfg: &BotConfig,
+    cache: &strategy::ForecastCache,
+) {
     info!("Updating forecasts...");
 
+    let noaa_weight = cfg.weather_sources.noaa_weight;
+    let google_weight = cfg.weather_sources.google_weight;
+    let fetch_noaa = noaa_weight > 0.0 || cfg.quality.require_both_sources;
+    let fetch_google = google_weight > 0.0 || cfg.quality.require_both_sources;
+
     for city in &cfg.cities {
-        match noaa.get_forecast(city).await {
-            Ok(forecast) => {
-                info!(
-                    "Forecast for {}: high={:.0}°F, low={:.0}°F, precip={:.0}%",
-                    city.name,
-                    forecast.high_temp_f,
-                    forecast.low_temp_f,
-                    forecast.precip_prob * 100.0
-                );
-                cache.insert(
-                    city.name.clone(),
-                    ForecastEntry {
-                        data: forecast,
-                        updated_at: std::time::Instant::now(),
-                    },
-                );
-            }
-            Err(e) => {
-                warn!("Failed to fetch forecast for {}: {}", city.name, e);
+        let mut successful_sources: Vec<&str> = Vec::new();
+        let mut weighted_forecasts: Vec<(ForecastData, f64)> = Vec::new();
+        let mut noaa_source: Option<ForecastData> = None;
+        let mut google_source: Option<ForecastData> = None;
+
+        if fetch_noaa {
+            match noaa.get_forecast(city).await {
+                Ok(forecast) => {
+                    successful_sources.push("NOAA");
+                    if noaa_weight > 0.0 {
+                        weighted_forecasts.push((forecast.clone(), noaa_weight));
+                    }
+                    noaa_source = Some(forecast);
+                }
+                Err(e) => {
+                    warn!("Failed NOAA forecast for {}: {}", city.name, e);
+                }
             }
         }
+
+        if fetch_google {
+            match google {
+                Some(client) => match client.get_forecast(city).await {
+                    Ok(forecast) => {
+                        successful_sources.push("Google");
+                        if google_weight > 0.0 {
+                            weighted_forecasts.push((forecast.clone(), google_weight));
+                        }
+                        google_source = Some(forecast);
+                    }
+                    Err(e) => {
+                        warn!("Failed Google forecast for {}: {}", city.name, e);
+                    }
+                },
+                None => {
+                    warn!(
+                        "Google forecast requested but client unavailable for {}",
+                        city.name
+                    );
+                }
+            }
+        }
+
+        if weighted_forecasts.is_empty() {
+            warn!("No healthy weather source available for {}", city.name);
+            continue;
+        }
+
+        let merged_forecast = if weighted_forecasts.len() == 1 {
+            weighted_forecasts.remove(0).0
+        } else {
+            blend_forecasts(&city.name, &weighted_forecasts)
+        };
+
+        info!(
+            "Forecast for {} [{}]: high={:.0}°F, low={:.0}°F, precip={:.0}%, std_dev={:.1}°F",
+            city.name,
+            successful_sources.join("+"),
+            merged_forecast.high_temp_f,
+            merged_forecast.low_temp_f,
+            merged_forecast.precip_prob * 100.0,
+            merged_forecast.temp_std_dev
+        );
+
+        cache.insert(
+            city.name.clone(),
+            ForecastEntry {
+                ensemble: merged_forecast,
+                noaa: noaa_source,
+                google: google_source,
+                updated_at: std::time::Instant::now(),
+            },
+        );
     }
 }
 
@@ -727,8 +876,25 @@ async fn run_strategy_cycle(
     .await;
 
     // Run strategy.
-    let intents = strategy.evaluate(&markets, &prices, forecast_cache, &position_map);
+    let evaluation =
+        strategy.evaluate_with_diagnostics(&markets, &prices, forecast_cache, &position_map);
+    let intents = evaluation.intents;
     let generated_count = intents.len();
+    let signal_rejected_count = evaluation.rejected.len();
+
+    for rejected in &evaluation.rejected {
+        write_trade_event(
+            trade_journal,
+            json!({
+                "ts": now_iso(),
+                "kind": "intent_rejected",
+                "cycle_id": cycle_id,
+                "ticker": &rejected.ticker,
+                "reason": &rejected.reason
+            }),
+        )
+        .await;
+    }
     if generated_count > 0 {
         for intent in &intents {
             write_trade_event(
@@ -760,6 +926,7 @@ async fn run_strategy_cycle(
                 "kind": "strategy_cycle_summary",
                 "cycle_id": cycle_id,
                 "generated": 0,
+                "signal_rejected": signal_rejected_count,
                 "approved": 0,
                 "risk_rejected": 0,
                 "orders_placed": 0,
@@ -785,6 +952,7 @@ async fn run_strategy_cycle(
                 "kind": "strategy_cycle_summary",
                 "cycle_id": cycle_id,
                 "generated": generated_count,
+                "signal_rejected": signal_rejected_count,
                 "approved": 0,
                 "risk_rejected": risk_rejected_count,
                 "orders_placed": 0,
@@ -868,6 +1036,7 @@ async fn run_strategy_cycle(
             "kind": "strategy_cycle_summary",
             "cycle_id": cycle_id,
             "generated": generated_count,
+            "signal_rejected": signal_rejected_count,
             "approved": approved_count,
             "risk_rejected": risk_rejected_count,
             "orders_placed": placed,
@@ -876,4 +1045,45 @@ async fn run_strategy_cycle(
         }),
     )
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_forecast(city: &str, high: f64, low: f64, precip: f64, std_dev: f64) -> ForecastData {
+        ForecastData {
+            city: city.to_string(),
+            high_temp_f: high,
+            low_temp_f: low,
+            precip_prob: precip,
+            temp_std_dev: std_dev,
+            fetched_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn blend_forecasts_normalizes_weights_after_failure() {
+        let weighted = vec![
+            (make_forecast("Seattle", 80.0, 60.0, 0.4, 5.0), 0.2),
+            (make_forecast("Seattle", 70.0, 50.0, 0.2, 3.0), 0.8),
+        ];
+
+        let blended = blend_forecasts("Seattle", &weighted);
+
+        assert!((blended.high_temp_f - 72.0).abs() < 0.0001);
+        assert!((blended.low_temp_f - 52.0).abs() < 0.0001);
+        assert!((blended.precip_prob - 0.24).abs() < 0.0001);
+    }
+
+    #[test]
+    fn blend_forecasts_keeps_uncertainty_floor() {
+        let weighted = vec![
+            (make_forecast("Seattle", 70.0, 69.0, 0.1, 0.1), 1.0),
+            (make_forecast("Seattle", 70.0, 69.0, 0.1, 0.1), 1.0),
+        ];
+
+        let blended = blend_forecasts("Seattle", &weighted);
+        assert!(blended.temp_std_dev >= 2.0);
+    }
 }

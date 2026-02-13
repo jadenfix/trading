@@ -3,5 +3,6 @@ node_modules
 dist
 build
 .env
-TRADES/
+TRADES/*
+!TRADES/README.md
 target/

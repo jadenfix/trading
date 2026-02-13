@@ -113,11 +113,6 @@ fn validate_config(config: &BotConfig) -> Result<(), Error> {
     if (config.weather_sources.noaa_weight + config.weather_sources.google_weight) <= 0.0 {
         issues.push("weather_sources total weight must be > 0".into());
     }
-    if (config.weather_sources.google_weight > 0.0 || config.quality.require_both_sources)
-        && config.google_weather_api_key.trim().is_empty()
-    {
-        issues.push("GOOGLE_WEATHER_API_KEY is required when Google forecasts are required".into());
-    }
 
     if config.quality.max_source_prob_gap < 0.0 || config.quality.max_source_prob_gap > 1.0 {
         issues.push("quality.max_source_prob_gap must be in [0,1]".into());
@@ -147,11 +142,6 @@ fn validate_config(config: &BotConfig) -> Result<(), Error> {
     if config.quality.max_spread_cents_ultra < 0 {
         issues.push("quality.max_spread_cents_ultra must be >= 0".into());
     }
-    if config.quality.require_both_sources && config.weather_sources.google_weight <= 0.0 {
-        issues.push(
-            "quality.require_both_sources=true requires weather_sources.google_weight > 0".into(),
-        );
-    }
 
     if issues.is_empty() {
         Ok(())
@@ -160,6 +150,43 @@ fn validate_config(config: &BotConfig) -> Result<(), Error> {
             "Invalid config:\n - {}",
             issues.join("\n - ")
         )))
+    }
+}
+
+fn apply_weather_source_fallbacks(config: &mut BotConfig) {
+    let has_google_key = !config.google_weather_api_key.trim().is_empty();
+
+    if !has_google_key {
+        if config.weather_sources.google_weight > 0.0 {
+            tracing::warn!(
+                "GOOGLE_WEATHER_API_KEY is missing; disabling Google forecast weight and running NOAA-only"
+            );
+            config.weather_sources.google_weight = 0.0;
+        }
+        if config.quality.require_both_sources {
+            tracing::warn!(
+                "GOOGLE_WEATHER_API_KEY is missing; disabling quality.require_both_sources for graceful fallback"
+            );
+            config.quality.require_both_sources = false;
+        }
+    }
+
+    if config.quality.require_both_sources
+        && (config.weather_sources.noaa_weight <= 0.0
+            || config.weather_sources.google_weight <= 0.0)
+    {
+        tracing::warn!(
+            "quality.require_both_sources requires both NOAA and Google weights > 0; disabling this gate"
+        );
+        config.quality.require_both_sources = false;
+    }
+
+    if (config.weather_sources.noaa_weight + config.weather_sources.google_weight) <= 0.0 {
+        tracing::warn!(
+            "Both weather source weights are disabled; defaulting to NOAA-only (noaa_weight=1.0)"
+        );
+        config.weather_sources.noaa_weight = 1.0;
+        config.weather_sources.google_weight = 0.0;
     }
 }
 
@@ -281,7 +308,10 @@ pub fn load_config() -> Result<BotConfig, Error> {
             parse_non_negative_i64(&raw, "WEATHER_MAX_SPREAD_CENTS_ULTRA")?;
     }
 
-    // 5. Validate required fields.
+    // 5. Graceful fallback logic for weather source config.
+    apply_weather_source_fallbacks(&mut config);
+
+    // 6. Validate required fields.
     if config.api_key.is_empty() {
         return Err(Error::Config(
             "KALSHI_API_KEY is required (set in .env or environment)".into(),
@@ -296,4 +326,38 @@ pub fn load_config() -> Result<BotConfig, Error> {
     validate_config(&config)?;
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_weather_source_fallbacks;
+    use common::config::BotConfig;
+
+    #[test]
+    fn missing_google_key_disables_google_requirements() {
+        let mut cfg = BotConfig::default();
+        cfg.weather_sources.noaa_weight = 0.5;
+        cfg.weather_sources.google_weight = 0.5;
+        cfg.quality.require_both_sources = true;
+        cfg.google_weather_api_key.clear();
+
+        apply_weather_source_fallbacks(&mut cfg);
+
+        assert_eq!(cfg.weather_sources.google_weight, 0.0);
+        assert!(!cfg.quality.require_both_sources);
+        assert_eq!(cfg.weather_sources.noaa_weight, 0.5);
+    }
+
+    #[test]
+    fn all_zero_weights_fallback_to_noaa_only() {
+        let mut cfg = BotConfig::default();
+        cfg.weather_sources.noaa_weight = 0.0;
+        cfg.weather_sources.google_weight = 0.0;
+        cfg.quality.require_both_sources = false;
+
+        apply_weather_source_fallbacks(&mut cfg);
+
+        assert_eq!(cfg.weather_sources.noaa_weight, 1.0);
+        assert_eq!(cfg.weather_sources.google_weight, 0.0);
+    }
 }

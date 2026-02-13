@@ -20,6 +20,20 @@ pub struct GoogleWeatherClient {
     api_key: String,
 }
 
+fn weather_bot_user_agent(contact_email: Option<&str>) -> String {
+    match contact_email {
+        Some(raw) => {
+            let email = raw.trim();
+            if email.is_empty() {
+                "weather-bot/0.1 (trading bot)".to_string()
+            } else {
+                format!("weather-bot/0.1 (trading bot; {email})")
+            }
+        }
+        None => "weather-bot/0.1 (trading bot)".to_string(),
+    }
+}
+
 /// Response from `forecast/hours:lookup`.
 #[derive(Debug, Deserialize)]
 pub struct LookupForecastHoursResponse {
@@ -67,9 +81,9 @@ pub struct PrecipitationProbability {
 }
 
 impl GoogleWeatherClient {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String, contact_email: Option<&str>) -> Self {
         let client = reqwest::Client::builder()
-            .user_agent("weather-bot/0.1 (trading bot; contact@example.com)")
+            .user_agent(weather_bot_user_agent(contact_email))
             .pool_max_idle_per_host(4)
             .timeout(std::time::Duration::from_secs(30))
             .build()

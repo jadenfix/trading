@@ -17,6 +17,20 @@ pub struct NoaaClient {
     client: reqwest::Client,
 }
 
+fn weather_bot_user_agent(contact_email: Option<&str>) -> String {
+    match contact_email {
+        Some(raw) => {
+            let email = raw.trim();
+            if email.is_empty() {
+                "weather-bot/0.1 (trading bot)".to_string()
+            } else {
+                format!("weather-bot/0.1 (trading bot; {email})")
+            }
+        }
+        None => "weather-bot/0.1 (trading bot)".to_string(),
+    }
+}
+
 // ── NOAA response types ───────────────────────────────────────────────
 
 /// Hourly forecast response from `/gridpoints/{wfo}/{x},{y}/forecast/hourly`.
@@ -94,9 +108,9 @@ pub struct GridpointValue {
 // ── Implementation ────────────────────────────────────────────────────
 
 impl NoaaClient {
-    pub fn new() -> Self {
+    pub fn new(contact_email: Option<&str>) -> Self {
         let client = reqwest::Client::builder()
-            .user_agent("weather-bot/0.1 (trading bot; contact@example.com)")
+            .user_agent(weather_bot_user_agent(contact_email))
             .pool_max_idle_per_host(4)
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -269,6 +283,6 @@ impl NoaaClient {
 
 impl Default for NoaaClient {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }

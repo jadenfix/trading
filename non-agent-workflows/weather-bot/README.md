@@ -72,7 +72,8 @@ Edit `config.toml` or override via environment. Key settings:
 
 Environment overrides:
 
-- `GOOGLE_WEATHER_API_KEY` (required when `weather_sources.google_weight > 0` or `quality.require_both_sources=true`)
+- `GOOGLE_WEATHER_API_KEY` (required to enable Google forecasts; if omitted, bot automatically falls back to NOAA-only)
+- `WEATHER_BOT_CONTACT_EMAIL` (optional; used in NOAA/Google API User-Agent contact field)
 - `WEATHER_NOAA_WEIGHT`
 - `WEATHER_GOOGLE_WEIGHT`
 - `WEATHER_QUALITY_MODE`

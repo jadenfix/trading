@@ -336,9 +336,25 @@ async fn main() {
     let tracked_markets: Arc<RwLock<HashMap<String, common::MarketInfo>>> =
         Arc::new(RwLock::new(HashMap::new()));
 
-    let noaa = NoaaClient::new();
-    let google = if cfg.weather_sources.google_weight > 0.0 || cfg.quality.require_both_sources {
-        Some(GoogleWeatherClient::new(cfg.google_weather_api_key.clone()))
+    let weather_contact_email = std::env::var("WEATHER_BOT_CONTACT_EMAIL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let noaa = NoaaClient::new(weather_contact_email.as_deref());
+
+    let google_requested =
+        cfg.weather_sources.google_weight > 0.0 || cfg.quality.require_both_sources;
+    let google = if google_requested {
+        if cfg.google_weather_api_key.trim().is_empty() {
+            warn!("Google forecasts requested but GOOGLE_WEATHER_API_KEY is empty; continuing without Google source");
+            None
+        } else {
+            Some(GoogleWeatherClient::new(
+                cfg.google_weather_api_key.clone(),
+                weather_contact_email.as_deref(),
+            ))
+        }
     } else {
         None
     };
@@ -731,7 +747,12 @@ async fn run_forecast_update(
     let noaa_weight = cfg.weather_sources.noaa_weight;
     let google_weight = cfg.weather_sources.google_weight;
     let fetch_noaa = noaa_weight > 0.0 || cfg.quality.require_both_sources;
-    let fetch_google = google_weight > 0.0 || cfg.quality.require_both_sources;
+    let google_requested = google_weight > 0.0 || cfg.quality.require_both_sources;
+    let fetch_google = google_requested && google.is_some();
+
+    if google_requested && google.is_none() {
+        warn!("Google source is configured but no Google client is available; running with NOAA-only data");
+    }
 
     for city in &cfg.cities {
         let mut successful_sources: Vec<&str> = Vec::new();

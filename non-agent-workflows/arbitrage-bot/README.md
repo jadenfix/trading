@@ -1,60 +1,77 @@
 # Kalshi Arbitrage Bot
 
-A high-performance arbitrage bot for Kalshi prediction markets.
+Rust bot that scans grouped Kalshi contracts and executes Buy-Set/Sell-Set opportunities under strict execution and risk controls.
 
-## Features
+## Runtime Flow
 
-- **Market Discovery**: Automatically discovers mutually exclusive event groups (e.g., "Will High Temp be > X?", "Will Fed hike rates?").
-- **Arbitrage Strategies**:
-  - **Buy-Set Arb**: Buys 'Yes' on all outcomes when total cost < payout ($1.00).
-  - **Sell-Set Arb**: Sells 'Yes' on all outcomes when total revenue > payout ($1.00).
-  - **EV-Mode**: Calculates probabilistic value for non-exhaustive sets (e.g. ranges that don't cover all possibilities) using EV discounting.
-- **Execution**: Batched FOK (Fill-Or-Kill) orders for atomic-like execution.
-- **Risk Management**:
-  - Emergency Unwind: Immediately liquidates partial fills to minimize leg risk.
-  - Exposure Limits: Per-event and portfolio-wide caps.
-  - Kill Switch: Stops trading after consecutive failures.
+1. Discover mutually exclusive market groups.
+2. Maintain live quote book state.
+3. Evaluate guaranteed arbitrage and optional EV-mode setups.
+4. Enforce risk limits before execution.
+5. Submit grouped orders with FOK-style handling.
+6. Unwind partial legs when needed and journal all events.
 
-## Usage
+## Quick Start
 
-1. **Configure**:
-   - Copy `config.toml` and adjust thresholds (min profit, slippage buffer, etc.).
-   - Keep `arb.guaranteed_arb_only = true` for only mathematically guaranteed set arbs.
-   - Set `arb.max_days_to_resolution` to limit universe discovery to near-term events.
-   - Set environment variables `KALSHI_API_KEY` and `KALSHI_SECRET_KEY`.
-   - If logs show frequent `no quote data` / `stale quotes`, increase `timing.quote_stale_secs`.
-   - Optional endpoint overrides for network/DNS issues:
-     - `KALSHI_API_BASE_URL` (REST base URL, e.g. `https://api.elections.kalshi.com`)
-     - `KALSHI_WS_URL` (WS URL, e.g. `wss://api.elections.kalshi.com/trade-api/ws/v2`)
-   - Optional WS auth toggle for public ticker feed debugging:
-     - `KALSHI_WS_DISABLE_AUTH=1` (skips WS auth headers)
-   - Trade journal:
-     - Bot writes JSONL trade/audit events to `<repo-root>/TRADES/arbitrage-bot` by default
-       (e.g. `/Users/jadenfix/Desktop/trading/TRADES/arbitrage-bot/trades-YYYY-MM-DD.jsonl`).
-     - Set `TRADES_DIR=/custom/root` to choose a different trades root. The bot still writes into
-       `TRADES_DIR/arbitrage-bot`.
-   - Heartbeat:
-     - Bot emits a 30-second `HEARTBEAT` log line so long runs do not appear stalled.
+```bash
+# 1) Set credentials
+export KALSHI_API_KEY="your-key"
+export KALSHI_SECRET_KEY="-----BEGIN RSA PRIVATE KEY-----\n..."
 
-2. **Run**:
-   ```bash
-   # Dry run (no orders submitted)
-   cargo run --release -- --dry-run
-   
-   # Live trading (environment from config.toml / USE_DEMO)
-   cargo run --release
+# 2) Authentication check
+cargo run --release -- --check-auth
 
-   # Check authentication only
-   cargo run --release -- --check-auth
-   ```
+# 3) Dry run (no live orders)
+cargo run --release -- --dry-run
+
+# 4) Live run
+cargo run --release
+
+# 5) Watch trade journal (from this directory)
+tail -f ../../TRADES/arbitrage-bot/trades-$(date +%F).jsonl
+```
+
+## Configuration
+
+Primary controls live in `config.toml`.
+
+Recommended defaults for safer startup:
+
+- keep `arb.guaranteed_arb_only = true`
+- reduce discovery horizon with `arb.max_days_to_resolution`
+- tune `timing.quote_stale_secs` if stale quote warnings are frequent
+
+Environment options:
+
+- required: `KALSHI_API_KEY`, `KALSHI_SECRET_KEY`
+- optional endpoint overrides: `KALSHI_API_BASE_URL` (REST), `KALSHI_WS_URL` (WebSocket)
+- optional WS auth bypass for diagnostics: `KALSHI_WS_DISABLE_AUTH=1`
+- optional trade root override: `TRADES_DIR=/custom/root`
+
+## Strategy and Risk Features
+
+- Buy-Set arbitrage: buy YES across a group when combined cost is below payout
+- Sell-Set arbitrage: sell YES across a group when combined revenue is above payout
+- EV-mode: discounted expected value handling for non-exhaustive groups
+- risk controls: per-event and portfolio exposure caps, kill switch, emergency unwind
+
+## Trade Journal and Health
+
+Default output path:
+
+- `<repo-root>/TRADES/arbitrage-bot/trades-YYYY-MM-DD.jsonl`
+
+Override root:
+
+- `TRADES_DIR=/custom/root` writes to `TRADES_DIR/arbitrage-bot`
+
+The bot emits a 30-second `HEARTBEAT` line for liveness monitoring.
 
 ## Architecture
 
-- **`crates/arb_strategy`**: Core logic library.
-  - `universe.rs`: Structuring markets into `ArbGroup`s.
-  - `quotes.rs`: Real-time orderbook management.
-  - `arb.rs`: Opportunity evaluation.
-  - `exec.rs`: Order execution and lifecycle.
-  - `risk.rs`: Safety checks.
-- **`src/main.rs`**: Application entry point.
-- **`libs/`**: Shared formatting and API clients (see top-level README).
+- `crates/arb_strategy/universe.rs`: group construction (`ArbGroup`)
+- `crates/arb_strategy/quotes.rs`: quote ingestion and freshness checks
+- `crates/arb_strategy/arb.rs`: opportunity evaluation
+- `crates/arb_strategy/exec.rs`: order submission and lifecycle
+- `crates/arb_strategy/risk.rs`: pre/post-trade safety checks
+- `src/main.rs`: binary entrypoint

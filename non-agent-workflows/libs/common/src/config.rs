@@ -36,6 +36,18 @@ pub struct BotConfig {
     /// Timing parameters (seconds).
     #[serde(default)]
     pub timing: TimingConfig,
+
+    /// Forecast source blend settings.
+    #[serde(default)]
+    pub weather_sources: WeatherSourcesConfig,
+
+    /// Google Weather API key (optional when google_weight is 0).
+    #[serde(default)]
+    pub google_weather_api_key: String,
+
+    /// Trade quality controls for selective signal generation.
+    #[serde(default)]
+    pub quality: QualityConfig,
 }
 
 /// Configuration for a single city.
@@ -149,6 +161,68 @@ pub struct TimingConfig {
     pub forecast_stale_secs: u64,
 }
 
+/// Forecast source weighting for ensemble forecasts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeatherSourcesConfig {
+    /// Relative weight for NOAA source.
+    #[serde(default = "default_noaa_weight")]
+    pub noaa_weight: f64,
+
+    /// Relative weight for Google Weather source.
+    #[serde(default = "default_google_weight")]
+    pub google_weight: f64,
+}
+
+/// Strategy quality modes.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QualityMode {
+    UltraSafe,
+    Balanced,
+    Aggressive,
+}
+
+/// Signal quality thresholds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QualityConfig {
+    /// Quality mode (affects spread and sizing policy).
+    #[serde(default = "default_quality_mode")]
+    pub mode: QualityMode,
+    /// If true, source disagreement blocks entries.
+    #[serde(default = "default_true")]
+    pub strict_source_veto: bool,
+    /// If true, both NOAA and Google estimates must be available for entries.
+    #[serde(default = "default_true")]
+    pub require_both_sources: bool,
+    /// Maximum absolute probability gap between sources.
+    #[serde(default = "default_max_source_prob_gap")]
+    pub max_source_prob_gap: f64,
+    /// Minimum source-specific confidence.
+    #[serde(default = "default_min_source_confidence")]
+    pub min_source_confidence: f64,
+    /// Minimum ensemble confidence.
+    #[serde(default = "default_min_ensemble_confidence")]
+    pub min_ensemble_confidence: f64,
+    /// Minimum conservative net edge in cents, after fees/slippage.
+    #[serde(default = "default_min_conservative_net_edge_cents")]
+    pub min_conservative_net_edge_cents: i64,
+    /// Minimum conservative expected value in cents per contract.
+    #[serde(default = "default_min_conservative_ev_cents")]
+    pub min_conservative_ev_cents: i64,
+    /// Minimum 24h volume.
+    #[serde(default = "default_min_volume_24h")]
+    pub min_volume_24h: i64,
+    /// Minimum open interest.
+    #[serde(default = "default_min_open_interest")]
+    pub min_open_interest: i64,
+    /// Extra slippage buffer in cents per contract.
+    #[serde(default = "default_slippage_buffer_cents")]
+    pub slippage_buffer_cents: i64,
+    /// Ultra-safe spread cap in cents.
+    #[serde(default = "default_max_spread_cents_ultra")]
+    pub max_spread_cents_ultra: i64,
+}
+
 // ── Defaults ──────────────────────────────────────────────────────────
 
 fn default_true() -> bool {
@@ -213,6 +287,42 @@ fn default_price_stale() -> u64 {
 }
 fn default_forecast_stale() -> u64 {
     3600
+}
+fn default_noaa_weight() -> f64 {
+    0.5
+}
+fn default_google_weight() -> f64 {
+    0.5
+}
+fn default_quality_mode() -> QualityMode {
+    QualityMode::UltraSafe
+}
+fn default_max_source_prob_gap() -> f64 {
+    0.08
+}
+fn default_min_source_confidence() -> f64 {
+    0.65
+}
+fn default_min_ensemble_confidence() -> f64 {
+    0.75
+}
+fn default_min_conservative_net_edge_cents() -> i64 {
+    8
+}
+fn default_min_conservative_ev_cents() -> i64 {
+    4
+}
+fn default_min_volume_24h() -> i64 {
+    50
+}
+fn default_min_open_interest() -> i64 {
+    25
+}
+fn default_slippage_buffer_cents() -> i64 {
+    1
+}
+fn default_max_spread_cents_ultra() -> i64 {
+    6
 }
 
 fn default_cities() -> Vec<CityConfig> {
@@ -316,6 +426,34 @@ impl Default for RiskConfig {
     }
 }
 
+impl Default for WeatherSourcesConfig {
+    fn default() -> Self {
+        Self {
+            noaa_weight: default_noaa_weight(),
+            google_weight: default_google_weight(),
+        }
+    }
+}
+
+impl Default for QualityConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_quality_mode(),
+            strict_source_veto: default_true(),
+            require_both_sources: default_true(),
+            max_source_prob_gap: default_max_source_prob_gap(),
+            min_source_confidence: default_min_source_confidence(),
+            min_ensemble_confidence: default_min_ensemble_confidence(),
+            min_conservative_net_edge_cents: default_min_conservative_net_edge_cents(),
+            min_conservative_ev_cents: default_min_conservative_ev_cents(),
+            min_volume_24h: default_min_volume_24h(),
+            min_open_interest: default_min_open_interest(),
+            slippage_buffer_cents: default_slippage_buffer_cents(),
+            max_spread_cents_ultra: default_max_spread_cents_ultra(),
+        }
+    }
+}
+
 impl Default for BotConfig {
     fn default() -> Self {
         Self {
@@ -327,6 +465,9 @@ impl Default for BotConfig {
             strategy: StrategyConfig::default(),
             risk: RiskConfig::default(),
             timing: TimingConfig::default(),
+            weather_sources: WeatherSourcesConfig::default(),
+            google_weather_api_key: String::new(),
+            quality: QualityConfig::default(),
         }
     }
 }

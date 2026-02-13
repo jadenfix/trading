@@ -38,12 +38,20 @@ export OPENAI_API_KEY="your-openai-key"
 export ANTHROPIC_API_KEY="your-anthropic-key"
 ```
 
-### 3. Run non-agent bots
+### 3. Run all tests from repo root
 
 From repo root:
 
 ```bash
-./run-bots.sh dry-run
+./trading-cli test
+```
+
+### 4. Run non-agent bots
+
+From repo root:
+
+```bash
+./trading-cli bots dry-run
 ```
 
 Or run each bot directly:
@@ -52,6 +60,40 @@ Or run each bot directly:
 cd non-agent-workflows/weather-bot && cargo run -- --dry-run
 cd non-agent-workflows/arbitrage-bot && cargo run --release -- --dry-run
 ```
+
+Direct script is still available:
+
+```bash
+./run-bots.sh dry-run
+```
+
+## Testing
+
+Run all current test suites from repo root:
+
+```bash
+./trading-cli test
+```
+
+Run a single suite:
+
+```bash
+./trading-cli test common
+./trading-cli test kalshi-client
+./trading-cli test weather-bot
+./trading-cli test arbitrage-bot
+```
+
+CI uses the same command (`./trading-cli test`) on every push and pull request.
+
+## Contributing
+
+Before opening a pull request:
+
+1. Keep changes scoped to the relevant workspace(s).
+2. Run tests from the repo root with `./trading-cli test`.
+3. Update docs/README files when behavior or commands change.
+4. Include a clear PR description covering what changed, why it changed, and how it was tested.
 
 ## Non-Agent Bot Summaries
 

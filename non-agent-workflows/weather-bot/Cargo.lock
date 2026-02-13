@@ -553,6 +553,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "google_weather_client"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "common",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "governor"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2339,6 +2351,7 @@ dependencies = [
  "clap",
  "common",
  "dotenvy",
+ "google_weather_client",
  "kalshi_client",
  "noaa_client",
  "serde",

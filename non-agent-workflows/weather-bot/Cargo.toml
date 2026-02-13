@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/google_weather_client",
     "crates/noaa_client",
     "crates/strategy",
 ]
@@ -18,6 +19,7 @@ path = "src/main.rs"
 common = { path = "../libs/common" }
 kalshi_client = { path = "../libs/kalshi_client" }
 noaa_client = { path = "crates/noaa_client" }
+google_weather_client = { path = "crates/google_weather_client" }
 strategy = { path = "crates/strategy" }
 
 tokio = { version = "1", features = ["full"] }

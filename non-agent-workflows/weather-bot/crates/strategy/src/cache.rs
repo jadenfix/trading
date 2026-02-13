@@ -11,7 +11,12 @@ use std::time::Instant;
 /// A cached forecast entry with staleness tracking.
 #[derive(Debug, Clone)]
 pub struct ForecastEntry {
-    pub data: ForecastData,
+    /// Blended ensemble forecast used for pricing.
+    pub ensemble: ForecastData,
+    /// Raw NOAA source forecast (if available).
+    pub noaa: Option<ForecastData>,
+    /// Raw Google source forecast (if available).
+    pub google: Option<ForecastData>,
     pub updated_at: Instant,
 }
 

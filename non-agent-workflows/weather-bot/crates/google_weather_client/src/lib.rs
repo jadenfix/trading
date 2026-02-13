@@ -108,6 +108,7 @@ impl GoogleWeatherClient {
                 ("unitsSystem", "IMPERIAL".to_string()),
                 ("hours", DEFAULT_WINDOW_HOURS.to_string()),
                 ("pageSize", MAX_PAGE_SIZE.to_string()),
+                // Google Maps Platform Weather API requires the API key as a `key` query parameter.
                 ("key", self.api_key.clone()),
             ];
             if let Some(token) = &page_token {

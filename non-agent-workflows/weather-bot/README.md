@@ -1,79 +1,67 @@
-# Weather Bot 🌤️
+# Weather Bot
 
-Kalshi weather market mispricing bot — single-binary Rust application.
+Rust bot that trades Kalshi weather markets when forecast-derived edge passes strict quality and risk gates.
 
-## What The Weather Bot Does
+## Runtime Flow
 
-The weather bot continuously scans open Kalshi weather markets and only places trades when a
-strict quality policy says the setup is strong enough.
+1. Discover active weather markets.
+2. Maintain live quotes through WebSocket streams.
+3. Pull NOAA and optional Google forecasts.
+4. Convert forecasts into market probability and confidence estimates.
+5. Apply quality gates (source agreement, confidence, edge/EV, liquidity, spread).
+6. Apply risk gates (position caps, city caps, drawdown guard, throttle).
+7. Place approved orders and journal every decision/event.
 
-Core runtime flow:
-
-1. Discovers relevant weather markets on Kalshi.
-2. Streams live prices through WebSocket and keeps a fresh in-memory price cache.
-3. Fetches forecasts from NOAA and Google Weather, then builds an ensemble forecast.
-4. Converts each city forecast into market probabilities (`p_yes`) and confidence bands.
-5. Applies quality gates before entry:
-   - source agreement checks (strict veto mode)
-   - confidence thresholds
-   - conservative edge and expected value thresholds (after fees/slippage)
-   - liquidity and spread filters
-6. Sends only approved intents through the risk manager (position caps, city caps, drawdown
-   guard, order throttle).
-7. Places orders and writes all outcomes to the trade journal.
-
-Design goal:
-
-- Trade less often, but with higher conviction and tighter downside controls.
+Goal: trade less often with higher conviction and controlled downside.
 
 ## Quick Start
 
 ```bash
-# 1. Set credentials in .env (project root or parent)
+# 1) Set credentials
 export KALSHI_API_KEY="your-key"
 export KALSHI_SECRET_KEY="-----BEGIN RSA PRIVATE KEY-----\n..."
 
-# 2. Verify auth works
+# 2) Verify connectivity/auth
 cargo run -- --check-auth
 
-# 3. Dry-run (discover markets + evaluate strategy, no orders)
+# 3) Strategy dry run (no live orders)
 cargo run -- --dry-run
 
-# 4. Run live
+# 4) Live run
 cargo run
 
-# 5. Watch trade/audit events
-tail -f /Users/jadenfix/Desktop/trading/TRADES/weather-bot/trades-$(date +%F).jsonl
+# 5) Watch trade journal (from this directory)
+tail -f ../../TRADES/weather-bot/trades-$(date +%F).jsonl
 ```
 
 ## Architecture
 
-- **`crates/strategy`**: Core decision logic comparing ensemble forecasts to Kalshi market probabilities.
-- **`crates/noaa_client`**: Client for fetching and parsing NWS grid forecasts.
-- **`crates/google_weather_client`**: Optional Google Weather API forecast client.
-- **`libs/kalshi_client`**: Shared Kalshi API client (REST + WebSocket).
-- **`libs/common`**: Shared types and utilities.
+- `crates/strategy`: core entry/exit decision logic
+- `crates/noaa_client`: NOAA forecast client
+- `crates/google_weather_client`: optional Google Weather forecast client
+- `../libs/kalshi_client`: shared Kalshi REST + WebSocket client
+- `../libs/common`: shared domain types and utilities
 
 ## Configuration
 
-Edit `config.toml` or override via environment. Key settings:
+Edit `config.toml` and/or environment variables.
 
 | Setting | Default | Description |
-|---------|---------|-------------|
-| `entry_threshold_cents` | 15 | Buy YES when ask ≤ this |
-| `exit_threshold_cents` | 45 | Sell YES when bid ≥ this |
-| `max_position_cents` | 500 | $5 max per market |
-| `max_trades_per_run` | 0 | `0` disables hard cap (quality gates decide) |
-| `weather_sources.noaa_weight` | 0.5 | Relative NOAA forecast weight |
-| `weather_sources.google_weight` | 0.5 | Relative Google forecast weight |
-| `quality.mode` | `ultra_safe` | Risk posture (`ultra_safe`, `balanced`, `aggressive`) |
-| `quality.strict_source_veto` | `true` | Block entries on source disagreement |
-| `quality.require_both_sources` | `true` | Require both NOAA and Google source forecasts |
+| --- | --- | --- |
+| `entry_threshold_cents` | 15 | Buy YES when ask <= this |
+| `exit_threshold_cents` | 45 | Sell YES when bid >= this |
+| `max_position_cents` | 500 | Max position size per market in cents |
+| `max_trades_per_run` | 0 | `0` means unlimited count, gated by quality/risk |
+| `weather_sources.noaa_weight` | 0.5 | NOAA forecast blend weight |
+| `weather_sources.google_weight` | 0.5 | Google forecast blend weight |
+| `quality.mode` | `ultra_safe` | `ultra_safe`, `balanced`, or `aggressive` |
+| `quality.strict_source_veto` | `true` | Block entries when sources disagree |
+| `quality.require_both_sources` | `true` | Require both NOAA and Google forecasts |
 
-Environment overrides:
+Common environment overrides:
 
-- `GOOGLE_WEATHER_API_KEY` (required to enable Google forecasts; if omitted, bot automatically falls back to NOAA-only)
-- `WEATHER_BOT_CONTACT_EMAIL` (optional; used in NOAA/Google API User-Agent contact field)
+- `GOOGLE_WEATHER_API_KEY`
+- `WEATHER_BOT_CONTACT_EMAIL`
 - `WEATHER_NOAA_WEIGHT`
 - `WEATHER_GOOGLE_WEIGHT`
 - `WEATHER_QUALITY_MODE`
@@ -89,24 +77,31 @@ Environment overrides:
 - `WEATHER_SLIPPAGE_BUFFER_CENTS`
 - `WEATHER_MAX_SPREAD_CENTS_ULTRA`
 
-### Trade Journal
+If `GOOGLE_WEATHER_API_KEY` is not set, the bot can run NOAA-only depending on config.
 
-- Weather bot writes JSONL trade/audit events to `<repo-root>/TRADES/weather-bot` by default.
-- Example file path:
-  - `/Users/jadenfix/Desktop/trading/TRADES/weather-bot/trades-YYYY-MM-DD.jsonl`
-- Set `TRADES_DIR=/custom/root` to use another root. The bot writes to `TRADES_DIR/weather-bot`.
-- Event stream includes:
-  - `bot_start`, `auth_check`, `dry_run_summary`, `dry_run_intent`, `dry_run_rejected`
-  - `discovery_cycle`, `forecast_cycle`, `strategy_cycle_start`, `intent_generated`, `intent_rejected`
-  - `order_placed`, `order_failed`, `strategy_cycle_summary`, `heartbeat`, `bot_shutdown`
+## Trade Journal and Health
 
-### Heartbeat
+Default output path:
 
-- Bot emits a 30-second `HEARTBEAT` line with tickers/markets/prices/forecasts counts so runtime health is always visible.
+- `<repo-root>/TRADES/weather-bot/trades-YYYY-MM-DD.jsonl`
 
-## Testing
+Override root:
+
+- `TRADES_DIR=/custom/root` writes to `TRADES_DIR/weather-bot`
+
+Event types include:
+
+- lifecycle: `bot_start`, `auth_check`, `bot_shutdown`
+- dry run: `dry_run_summary`, `dry_run_intent`, `dry_run_rejected`
+- live flow: `discovery_cycle`, `forecast_cycle`, `intent_generated`, `intent_rejected`
+- orders: `order_placed`, `order_failed`
+- monitoring: `heartbeat`
+
+The bot also emits a 30-second `HEARTBEAT` log line for liveness checks.
+
+## Development Checks
 
 ```bash
 cargo test --workspace
-cargo clippy --workspace  # Lint check
+cargo clippy --workspace
 ```

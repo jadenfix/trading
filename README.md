@@ -1,107 +1,87 @@
 # Agentic Trading Monorepo
 
-Welcome to the **Agentic Trading** monorepo. This repository houses multiple frameworks for building advanced trading systems, initially focusing on agentic workflows, traditional algorithms, and LLM-integrated strategies.
+Monorepo for three trading tracks:
 
-## Structure
+- agent-style workflows (`clawdbot-workflows`)
+- deterministic Rust bots (`non-agent-workflows`)
+- LLM research workspace (`llm-workflows`)
 
-The repository is organized into the following workspaces:
+## Workspace Map
 
-### 1. [`clawdbot-workflows`](./clawdbot-workflows)
-*   **Description**: The core bot framework, migrated from `openclaw`. This serves as the foundation for agent-based interactions and gateway capabilities.
-*   **Status**: Active (migrated)
+| Workspace | Purpose | Start Here |
+| --- | --- | --- |
+| [`clawdbot-workflows`](./clawdbot-workflows) | Imported OpenClaw-based agent framework and gateway stack | [`clawdbot-workflows/README.md`](./clawdbot-workflows/README.md) |
+| [`non-agent-workflows`](./non-agent-workflows) | Kalshi-focused Rust bots (weather + arbitrage) | [`non-agent-workflows/README.md`](./non-agent-workflows/README.md) |
+| [`llm-workflows`](./llm-workflows) | LLM trading experiments and prototypes (early scaffold) | [`llm-workflows/README.md`](./llm-workflows/README.md) |
 
-### 2. [`llm-workflows`](./llm-workflows)
-*   **Description**: A framework dedicated to Large Language Model (LLM) integrations for market analysis, sentiment analysis, and decision-making support.
-*   **Status**: Initialized
+## Quick Start
 
-### 3. [`non-agent-workflows`](./non-agent-workflows)
-*   **Description**: A clean environment for traditional, non-agentic trading algorithms, data processing scripts, and quantitative analysis tools.
-*   **Status**: Initialized
-
-## Non-Agent Bots High-Level
-
-### Weather Bot ([`non-agent-workflows/weather-bot`](./non-agent-workflows/weather-bot))
-
-High-level behavior:
-
-1. Discovers active Kalshi weather markets and keeps live prices updated from WebSocket feeds.
-2. Pulls forecasts from NOAA and Google Weather, then combines them with a weighted ensemble.
-3. Converts forecast inputs into market probabilities and confidence estimates.
-4. Applies strict quality filters before entering trades (source agreement, confidence, conservative edge/EV, liquidity/spread).
-5. Routes approved intents through risk controls, places orders, and journals all runtime events.
-
-Primary goal: fewer bets with higher conviction and controlled downside.
-
-See details: [`non-agent-workflows/weather-bot/README.md`](./non-agent-workflows/weather-bot/README.md)
-
-### Arbitrage Bot ([`non-agent-workflows/arbitrage-bot`](./non-agent-workflows/arbitrage-bot))
-
-High-level behavior:
-
-1. Discovers related Kalshi contracts that form mutually exclusive outcome groups.
-2. Detects Buy-Set and Sell-Set opportunities where combined prices imply locked-in edge.
-3. Supports EV-mode for non-exhaustive sets with explicit discounting.
-4. Executes grouped orders with FOK-style handling to reduce legging risk.
-5. Enforces risk constraints (exposure caps, kill-switch, emergency unwind) and journals outcomes.
-
-Primary goal: capture pricing inefficiencies while minimizing partial-fill and tail-risk exposure.
-
-See details: [`non-agent-workflows/arbitrage-bot/README.md`](./non-agent-workflows/arbitrage-bot/README.md)
-
-## Getting Started
-
-This project is managed as a **pnpm workspace**.
-
-### Prerequisites
-*   Node.js (matching engines in package.json)
-*   pnpm
-
-### Installation
+### 1. Install dependencies
 
 ```bash
 pnpm install
 ```
 
-## Workflows
-
-Navigate to the respective directories to run specific workflows or check their `package.json` for available scripts.
-
-## Kalshi API Set UP 
+### 2. Configure required credentials
 
 ```bash
-export KALSHI_API_KEY="[ENCRYPTION_KEY]"
-export KALSHI_SECRET_KEY="[ENCRYPTION_KEY]"
+export KALSHI_API_KEY="your-key-id"
+export KALSHI_SECRET_KEY="your-private-key"
 ```
 
-## Weather API Set Up
-
-For weather-bot configurations that use Google forecast data, set:
+Optional:
 
 ```bash
-export GOOGLE_WEATHER_API_KEY="[ENCRYPTION_KEY]"
-```
-
-This key is required when Google weather input is enabled (for example, non-zero Google weight or strict "require both sources" mode). If omitted, the bot will gracefully fall back to NOAA-only weather input.
-
-Optional weather API contact:
-
-```bash
+export GOOGLE_WEATHER_API_KEY="your-google-key"
 export WEATHER_BOT_CONTACT_EMAIL="you@yourdomain.com"
+export OPENAI_API_KEY="your-openai-key"
+export ANTHROPIC_API_KEY="your-anthropic-key"
 ```
 
-## LLM Key Set Up
+### 3. Run non-agent bots
+
+From repo root:
 
 ```bash
-export OPENAI_API_KEY="[ENCRYPTION_KEY]"
+./run-bots.sh dry-run
 ```
-or 
+
+Or run each bot directly:
+
 ```bash
-export ANTHROPIC_API_KEY="[ENCRYPTION_KEY]"
+cd non-agent-workflows/weather-bot && cargo run -- --dry-run
+cd non-agent-workflows/arbitrage-bot && cargo run --release -- --dry-run
 ```
 
-## Trade Journals
+## Non-Agent Bot Summaries
 
-The non-agent bots write runtime JSONL trade journals under:
+### Weather Bot
 
-- `../trading/TRADES/arbitrage-bot`
-- `../trading/TRADES/weather-bot`
+Path: [`non-agent-workflows/weather-bot`](./non-agent-workflows/weather-bot)
+
+- discovers weather markets
+- blends NOAA and Google forecasts
+- applies quality + risk gates before sending orders
+- writes JSONL runtime events to `TRADES/weather-bot`
+
+Details: [`non-agent-workflows/weather-bot/README.md`](./non-agent-workflows/weather-bot/README.md)
+
+### Arbitrage Bot
+
+Path: [`non-agent-workflows/arbitrage-bot`](./non-agent-workflows/arbitrage-bot)
+
+- discovers mutually exclusive contract sets
+- scans Buy-Set and Sell-Set opportunities
+- executes grouped orders with strict risk checks
+- writes JSONL runtime events to `TRADES/arbitrage-bot`
+
+Details: [`non-agent-workflows/arbitrage-bot/README.md`](./non-agent-workflows/arbitrage-bot/README.md)
+
+## Logs and Journals
+
+By default, trade logs are written under:
+
+- `TRADES/arbitrage-bot`
+- `TRADES/weather-bot`
+
+Use `TRADES_DIR=/custom/path` to change the root folder.

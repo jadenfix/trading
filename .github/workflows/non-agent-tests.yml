@@ -2,6 +2,8 @@ name: non-agent-tests
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 permissions:

@@ -1,7 +1,9 @@
 # Weather Bot — Default Configuration
 # Override with environment variables or .env file.
 # KALSHI_API_KEY and KALSHI_SECRET_KEY must be set in .env or environment.
-# Optional: GOOGLE_WEATHER_API_KEY (required here because quality.require_both_sources = true).
+# Optional: GOOGLE_WEATHER_API_KEY enables Google forecast source.
+# If missing, bot gracefully disables Google source and continues with NOAA-only.
+# Optional: WEATHER_BOT_CONTACT_EMAIL for NOAA/Google API User-Agent contact.
 
 # Use demo environment (set to false for production)
 use_demo = true
@@ -40,7 +42,7 @@ google_weight = 0.5             # Relative weight for Google Weather
 [quality]
 mode = "ultra_safe"
 strict_source_veto = true
-require_both_sources = true
+require_both_sources = true      # Auto-disabled if Google source is unavailable
 max_source_prob_gap = 0.08
 min_source_confidence = 0.65
 min_ensemble_confidence = 0.75

@@ -28,6 +28,8 @@ This repository contains algorithmic trading bots for the Kalshi prediction mark
      KALSHI_API_KEY=your_key_id
      KALSHI_SECRET_KEY="your_private_key_pem_content"
      USE_DEMO=true  # Set to false for production
+     GOOGLE_WEATHER_API_KEY=your_google_weather_api_key  # Required only when Google source is enabled; otherwise weather-bot falls back to NOAA-only
+     WEATHER_BOT_CONTACT_EMAIL=you@yourdomain.com  # Optional contact used in NOAA/Google API User-Agent
      ```
    - Each bot also supports a `config.toml` for strategy parameters.
 

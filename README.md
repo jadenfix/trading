@@ -73,6 +73,22 @@ export KALSHI_API_KEY="[ENCRYPTION_KEY]"
 export KALSHI_SECRET_KEY="[ENCRYPTION_KEY]"
 ```
 
+## Weather API Set Up
+
+For weather-bot configurations that use Google forecast data, set:
+
+```bash
+export GOOGLE_WEATHER_API_KEY="[ENCRYPTION_KEY]"
+```
+
+This key is required when Google weather input is enabled (for example, non-zero Google weight or strict "require both sources" mode). If omitted, the bot will gracefully fall back to NOAA-only weather input.
+
+Optional weather API contact:
+
+```bash
+export WEATHER_BOT_CONTACT_EMAIL="you@yourdomain.com"
+```
+
 ## LLM Key Set Up
 
 ```bash

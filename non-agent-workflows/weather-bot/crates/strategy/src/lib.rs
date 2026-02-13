@@ -7,5 +7,5 @@ pub mod engine;
 pub mod risk;
 
 pub use cache::{new_forecast_cache, ForecastCache, ForecastEntry};
-pub use engine::StrategyEngine;
+pub use engine::{EvaluationResult, RejectedSignal, StrategyEngine};
 pub use risk::RiskManager;

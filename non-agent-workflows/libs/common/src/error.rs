@@ -22,6 +22,9 @@ pub enum Error {
     #[error("NOAA API error: {0}")]
     Noaa(String),
 
+    #[error("Google Weather API error: {0}")]
+    GoogleWeather(String),
+
     #[error("Kalshi API error (status={status}): {message}")]
     KalshiApi { status: u16, message: String },
 

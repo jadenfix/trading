@@ -102,11 +102,20 @@ function compareTraces(left, right) {
 }
 
 async function loadConfig() {
-  const response = await fetch("/api/config", { cache: "no-store" });
-  const payload = await response.json();
-  state.config = payload;
-  if (payload.temporal_ui_url) {
-    temporalLinkEl.href = payload.temporal_ui_url;
+  try {
+    const response = await fetch("/api/config", { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`Failed to load config: ${response.status} ${response.statusText}`);
+    }
+    const payload = await response.json();
+    state.config = payload || {};
+    if (payload && payload.temporal_ui_url) {
+      temporalLinkEl.href = payload.temporal_ui_url;
+    }
+  } catch (error) {
+    console.error("Error loading config from /api/config:", error);
+    // Fallback to a safe default config; preserve any existing temporal link if present.
+    state.config = state.config || {};
   }
 }
 
@@ -315,8 +324,8 @@ function renderExecutionHighlights(executions) {
       <h4>Executed In This Trace</h4>
       <div class="execution-highlight-list">
         ${executions
-          .map((execution) => {
-            return `
+      .map((execution) => {
+        return `
               <article class="execution-highlight-card">
                 <p class="execution-summary">${escapeHtml(execution.summary || "Executed trade")}</p>
                 <p class="execution-meta">
@@ -325,8 +334,8 @@ function renderExecutionHighlights(executions) {
                 </p>
               </article>
             `;
-          })
-          .join("")}
+      })
+      .join("")}
       </div>
     </section>
   `;

@@ -73,7 +73,11 @@ struct Cli {
     #[arg(long, default_value_t = 8)]
     min_net_edge_cents: i64,
 
-    #[arg(long, default_value_t = 7000)]
+    #[arg(
+        long,
+        default_value_t = 7000,
+        help = "Minimum posterior lower bound in basis points (bps). Default 7000 bps = 70%."
+    )]
     min_lower_bound_bps: i64,
 
     #[arg(long, default_value_t = 250)]
@@ -1001,7 +1005,7 @@ async fn run_cycle(
     let mut sports_games: Vec<SportsDataGame> = Vec::new();
     if let Some(key) = sports_data_key {
         let today = Utc::now().date_naive();
-        for offset in 0..2 {
+        for offset in 0..7 {
             let target = today - ChronoDuration::days(offset);
             match fetch_sportsdata_games(http_client, &cli.sportsdataio_league, key, target).await {
                 Ok(mut payload) => sports_games.append(&mut payload),
@@ -1290,6 +1294,12 @@ async fn main() -> Result<()> {
 
     let mut cycle = 0u64;
     loop {
+        // Check for shutdown signal before starting a new cycle
+        if let Ok(()) = tokio::signal::ctrl_c().await {
+            info!("shutdown signal received, stopping worker loop");
+            break;
+        }
+
         cycle = cycle.saturating_add(1);
 
         let workflow_id = format!(
@@ -1310,25 +1320,43 @@ async fn main() -> Result<()> {
             json!({"cycle_interval_secs": cli.interval_secs}),
         ));
 
-        if let Err(e) = run_cycle(
-            &cli,
-            &trace,
-            &mut journal,
-            &rest_client,
-            &http_client,
-            sports_data_key.as_deref(),
-            odds_key.as_deref(),
-        )
-        .await
-        {
-            error!("cycle {} failed: {}", cycle, e);
-            journal.write_event(compose_trace_event(
+        // Use tokio::select! to handle shutdown during the cycle execution
+        tokio::select! {
+            result = run_cycle(
+                &cli,
                 &trace,
-                "strategy_cycle_error",
-                json!({"error": e.to_string()}),
-            ));
+                &mut journal,
+                &rest_client,
+                &http_client,
+                sports_data_key.as_deref(),
+                odds_key.as_deref(),
+            ) => {
+                if let Err(e) = result {
+                    error!("cycle {} failed: {}", cycle, e);
+                    let mut err_map = serde_json::Map::new();
+                    err_map.insert("error".to_string(), serde_json::Value::String(e.to_string()));
+                    journal.write_event(compose_trace_event(
+                        &trace,
+                        "strategy_cycle_error",
+                        serde_json::Value::Object(err_map),
+                    ));
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("shutdown signal received during cycle {}, aborting", cycle);
+                break;
+            }
         }
 
-        sleep(Duration::from_secs(cli.interval_secs)).await;
+        // Wait for next cycle or shutdown signal
+        tokio::select! {
+            _ = sleep(Duration::from_secs(cli.interval_secs)) => {}
+            _ = tokio::signal::ctrl_c() => {
+                info!("shutdown signal received during sleep, stopping");
+                break;
+            }
+        }
     }
+    
+    Ok(())
 }

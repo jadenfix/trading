@@ -49,6 +49,9 @@ function persistState() {
     .then(async () => {
       await ensureStateDir();
       await writeFile(stateFile, JSON.stringify(state, null, 2), "utf8");
+    })
+    .catch((err) => {
+      console.error(`[broker] Failed to persist state to ${stateFile}:`, err);
     });
   return writeInFlight;
 }

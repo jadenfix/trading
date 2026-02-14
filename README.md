@@ -46,15 +46,33 @@ From repo root:
 bash ./trading-cli test
 ```
 
-### 4. Run non-agent bots
+### 4. Run workflows from the orchestrator
 
 From repo root:
 
 ```bash
-bash ./trading-cli bots dry-run
+bash ./trading-cli weather go dry-run
+bash ./trading-cli arbitrage go dry-run
+bash ./trading-cli llm-workflow go
 ```
 
-Or run each bot directly:
+Workflow command reference:
+
+```bash
+bash ./trading-cli weather [go|up|down|status|logs] [prod|dry-run|check-auth]
+bash ./trading-cli arbitrage [go|up|down|status|logs] [prod|dry-run|check-auth]
+bash ./trading-cli llm-workflow [go|up|down|status|logs]
+```
+
+Launch all three in background dev mode:
+
+```bash
+bash ./trading-cli dev
+bash ./trading-cli status
+bash ./trading-cli down
+```
+
+Or run bots directly:
 
 ```bash
 cd non-agent-workflows/weather-bot && cargo run -- --dry-run
@@ -72,7 +90,8 @@ Direct script is still available:
 Run all current test suites from repo root:
 
 ```bash
-bash ./trading-cli test
+bash ./trading-cli test            # inclusive default
+bash ./trading-cli test inclusive  # explicit inclusive alias
 ```
 
 Run a single suite:
@@ -80,8 +99,9 @@ Run a single suite:
 ```bash
 bash ./trading-cli test common
 bash ./trading-cli test kalshi-client
-bash ./trading-cli test weather-bot
-bash ./trading-cli test arbitrage-bot
+bash ./trading-cli test weather
+bash ./trading-cli test arbitrage
+bash ./trading-cli test llm-workflow
 ```
 
 CI uses the same command (`bash ./trading-cli test`) on every push and pull request.

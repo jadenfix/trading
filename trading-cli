@@ -265,44 +265,13 @@ workflow_mode_to_arg() {
   esac
 }
 
-workflow_mode_to_cmd_suffix() {
-  local mode="$1"
-  local flag
-  if ! flag="$(workflow_mode_to_arg "$mode")"; then
-    return 1
-  fi
-
-  if [[ -n "$flag" ]]; then
-    echo "$flag"
-  else
-    echo ""
-  fi
-}
-
-weather_run_cmd() {
-  local mode="$1"
-  local suffix
-  suffix="$(workflow_mode_to_cmd_suffix "$mode")" || return 1
-  if [[ -n "$suffix" ]]; then
-    echo "cd '$ROOT_DIR/non-agent-workflows/weather-bot' && cargo run -- $suffix"
-  else
-    echo "cd '$ROOT_DIR/non-agent-workflows/weather-bot' && cargo run"
-  fi
-}
-
-arbitrage_run_cmd() {
-  local mode="$1"
-  local suffix
-  suffix="$(workflow_mode_to_cmd_suffix "$mode")" || return 1
-  if [[ -n "$suffix" ]]; then
-    echo "cd '$ROOT_DIR/non-agent-workflows/arbitrage-bot' && cargo run --release -- $suffix"
-  else
-    echo "cd '$ROOT_DIR/non-agent-workflows/arbitrage-bot' && cargo run --release"
-  fi
-}
-
-llm_workflow_run_cmd() {
-  echo "cd '$ROOT_DIR/llm-workflows/llm-rules-bot' && cargo run"
+run_in_dir() {
+  local workdir="$1"
+  shift
+  (
+    cd "$workdir"
+    exec "$@"
+  )
 }
 
 pidfile_for() {
@@ -347,7 +316,8 @@ service_status_line() {
 
 start_service_bg() {
   local service="$1"
-  local cmd="$2"
+  local workdir="$2"
+  shift 2
   local pidfile logfile
   pidfile="$(pidfile_for "$service")"
   logfile="$(logfile_for "$service")"
@@ -363,8 +333,8 @@ start_service_bg() {
   fi
 
   (
-    cd "$ROOT_DIR"
-    exec bash -lc "$cmd"
+    cd "$workdir"
+    exec "$@"
   ) >"$logfile" 2>&1 &
 
   local pid="$!"
@@ -386,17 +356,17 @@ start_service_bg() {
 run_dev() {
   mkdir -p "$LOG_DIR"
 
-  if ! start_service_bg "weather" "$(weather_run_cmd dry-run)"; then
+  if ! start_service_bg "weather" "$ROOT_DIR/non-agent-workflows/weather-bot" cargo run -- --dry-run; then
     echo "dev startup failed while starting weather" >&2
     run_down >/dev/null 2>&1 || true
     exit 1
   fi
-  if ! start_service_bg "arbitrage" "$(arbitrage_run_cmd dry-run)"; then
+  if ! start_service_bg "arbitrage" "$ROOT_DIR/non-agent-workflows/arbitrage-bot" cargo run --release -- --dry-run; then
     echo "dev startup failed while starting arbitrage" >&2
     run_down >/dev/null 2>&1 || true
     exit 1
   fi
-  if ! start_service_bg "llm-workflow" "$(llm_workflow_run_cmd)"; then
+  if ! start_service_bg "llm-workflow" "$ROOT_DIR/llm-workflows/llm-rules-bot" cargo run; then
     echo "dev startup failed while starting llm-workflow" >&2
     run_down >/dev/null 2>&1 || true
     exit 1
@@ -475,7 +445,7 @@ run_service_logs() {
 run_weather() {
   local action="${1:-go}"
   local mode="${2:-dry-run}"
-  local cmd
+  local mode_arg
   if [[ $# -gt 2 ]]; then
     echo "Too many arguments for weather command" >&2
     echo "Use: ./trading-cli weather [go|up|down|status|logs] [prod|dry-run|check-auth]" >&2
@@ -484,22 +454,32 @@ run_weather() {
 
   case "$action" in
     go|run)
-      if ! cmd="$(weather_run_cmd "$mode")"; then
+      if ! mode_arg="$(workflow_mode_to_arg "$mode")"; then
         echo "Invalid weather mode: $mode" >&2
         usage
         exit 1
       fi
-      exec bash -lc "$cmd"
+      if [[ -n "$mode_arg" ]]; then
+        run_in_dir "$ROOT_DIR/non-agent-workflows/weather-bot" cargo run -- "$mode_arg"
+      else
+        run_in_dir "$ROOT_DIR/non-agent-workflows/weather-bot" cargo run
+      fi
       ;;
     up|start)
-      if ! cmd="$(weather_run_cmd "$mode")"; then
+      if ! mode_arg="$(workflow_mode_to_arg "$mode")"; then
         echo "Invalid weather mode: $mode" >&2
         usage
         exit 1
       fi
       mkdir -p "$LOG_DIR"
-      if ! start_service_bg "weather" "$cmd"; then
-        exit 1
+      if [[ -n "$mode_arg" ]]; then
+        if ! start_service_bg "weather" "$ROOT_DIR/non-agent-workflows/weather-bot" cargo run -- "$mode_arg"; then
+          exit 1
+        fi
+      else
+        if ! start_service_bg "weather" "$ROOT_DIR/non-agent-workflows/weather-bot" cargo run; then
+          exit 1
+        fi
       fi
       ;;
     down|stop)
@@ -516,12 +496,7 @@ run_weather() {
         echo "Mode shorthand takes one argument: ./trading-cli weather <prod|dry-run|check-auth>" >&2
         exit 1
       fi
-      if ! cmd="$(weather_run_cmd "$action")"; then
-        echo "Invalid weather mode: $action" >&2
-        usage
-        exit 1
-      fi
-      exec bash -lc "$cmd"
+      run_weather go "$action"
       ;;
     *)
       echo "Unknown weather action: $action" >&2
@@ -534,7 +509,7 @@ run_weather() {
 run_arbitrage() {
   local action="${1:-go}"
   local mode="${2:-dry-run}"
-  local cmd
+  local mode_arg
   if [[ $# -gt 2 ]]; then
     echo "Too many arguments for arbitrage command" >&2
     echo "Use: ./trading-cli arbitrage [go|up|down|status|logs] [prod|dry-run|check-auth]" >&2
@@ -543,22 +518,32 @@ run_arbitrage() {
 
   case "$action" in
     go|run)
-      if ! cmd="$(arbitrage_run_cmd "$mode")"; then
+      if ! mode_arg="$(workflow_mode_to_arg "$mode")"; then
         echo "Invalid arbitrage mode: $mode" >&2
         usage
         exit 1
       fi
-      exec bash -lc "$cmd"
+      if [[ -n "$mode_arg" ]]; then
+        run_in_dir "$ROOT_DIR/non-agent-workflows/arbitrage-bot" cargo run --release -- "$mode_arg"
+      else
+        run_in_dir "$ROOT_DIR/non-agent-workflows/arbitrage-bot" cargo run --release
+      fi
       ;;
     up|start)
-      if ! cmd="$(arbitrage_run_cmd "$mode")"; then
+      if ! mode_arg="$(workflow_mode_to_arg "$mode")"; then
         echo "Invalid arbitrage mode: $mode" >&2
         usage
         exit 1
       fi
       mkdir -p "$LOG_DIR"
-      if ! start_service_bg "arbitrage" "$cmd"; then
-        exit 1
+      if [[ -n "$mode_arg" ]]; then
+        if ! start_service_bg "arbitrage" "$ROOT_DIR/non-agent-workflows/arbitrage-bot" cargo run --release -- "$mode_arg"; then
+          exit 1
+        fi
+      else
+        if ! start_service_bg "arbitrage" "$ROOT_DIR/non-agent-workflows/arbitrage-bot" cargo run --release; then
+          exit 1
+        fi
       fi
       ;;
     down|stop)
@@ -575,12 +560,7 @@ run_arbitrage() {
         echo "Mode shorthand takes one argument: ./trading-cli arbitrage <prod|dry-run|check-auth>" >&2
         exit 1
       fi
-      if ! cmd="$(arbitrage_run_cmd "$action")"; then
-        echo "Invalid arbitrage mode: $action" >&2
-        usage
-        exit 1
-      fi
-      exec bash -lc "$cmd"
+      run_arbitrage go "$action"
       ;;
     *)
       echo "Unknown arbitrage action: $action" >&2
@@ -592,8 +572,6 @@ run_arbitrage() {
 
 run_llm_workflow() {
   local action="${1:-go}"
-  local cmd
-  cmd="$(llm_workflow_run_cmd)"
   if [[ $# -gt 1 ]]; then
     echo "Too many arguments for llm-workflow command" >&2
     echo "Use: ./trading-cli llm-workflow [go|up|down|status|logs]" >&2
@@ -602,11 +580,11 @@ run_llm_workflow() {
 
   case "$action" in
     go|run)
-      exec bash -lc "$cmd"
+      run_in_dir "$ROOT_DIR/llm-workflows/llm-rules-bot" cargo run
       ;;
     up|start)
       mkdir -p "$LOG_DIR"
-      if ! start_service_bg "llm-workflow" "$cmd"; then
+      if ! start_service_bg "llm-workflow" "$ROOT_DIR/llm-workflows/llm-rules-bot" cargo run; then
         exit 1
       fi
       ;;

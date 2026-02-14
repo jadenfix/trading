@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use candidate_engine::Scanner;
 use decision_engine::{Decision, DecisionEngine, DeterministicInput};
 use execution_engine::{ExecutionEngine, ExecutionOutcome};
@@ -61,8 +61,9 @@ impl Bot {
                 );
             }
 
-            let anthropic_key =
-                std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY must be set");
+            let anthropic_key = std::env::var("ANTHROPIC_API_KEY").context(
+                "ANTHROPIC_API_KEY must be set when temporal research backend is disabled",
+            )?;
             ResearchBackend::DirectLlm(LlmClient::new(
                 anthropic_key,
                 config.llm.model.clone(),

@@ -4,6 +4,6 @@
   "private": true,
   "description": "LLM trading workflows workspace metadata",
   "scripts": {
-    "test": "echo \"Use cargo tests in llm-rules-bot\""
+    "test": "cd llm-rules-bot && cargo test --workspace --all-targets"
   }
 }

@@ -65,12 +65,12 @@ JSON Schema:
 
         let user_prompt = json!({
             "task": "analyze_market_rules",
-            "market_ticker": request.market_ticker,
-            "event_ticker": request.event_ticker,
-            "rules": request.rules_primary,
-            "rules_secondary": request.rules_secondary,
-            "context": request.candidate_snapshot, // Snapshot of current market state
-            "allowed_sources": request.allowed_urls,
+            "market_ticker": &request.market_ticker,
+            "event_ticker": &request.event_ticker,
+            "rules": &request.rules_primary,
+            "rules_secondary": &request.rules_secondary,
+            "context": &request.candidate_snapshot, // Snapshot of current market state
+            "allowed_sources": &request.allowed_urls,
             "current_time_ms": request.as_of_ts_ms
         });
 

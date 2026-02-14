@@ -14,6 +14,8 @@ KNOWN_COMMANDS=(
   arbitrage
   llm-workflow
   temporal
+  observability
+  sports-agent
   dev
   down
   status
@@ -32,6 +34,8 @@ Commands:
   ./trading-cli arbitrage [go|up|down|status|logs] [prod|dry-run|check-auth] # deterministic arbitrage orchestrator
   ./trading-cli llm-workflow [go|up|down|status|logs]                         # llm workflow orchestrator
   ./trading-cli temporal [up|down|status|logs|ui|list|describe|show]          # temporal debugger/server orchestrator
+  ./trading-cli observability [up|down|status|logs|ui] [service]              # observability stack orchestrator
+  ./trading-cli sports-agent [go|up|down|status|logs|approve] [--mode <hitl|auto_ultra_strict>] [--dry-run] [trace_id]
   ./trading-cli dev                                 # launch weather+arbitrage+llm-workflow (bg)
   ./trading-cli down                                # stop all background services
   ./trading-cli status                              # show all background service statuses
@@ -49,6 +53,7 @@ Test suites:
   llm-execution-engine
   llm-client
   llm-rules-bot-bin
+  sports-agent
 
 Examples:
   ./trading-cli test
@@ -63,6 +68,10 @@ Examples:
   ./trading-cli temporal ui
   ./trading-cli temporal list
   ./trading-cli temporal describe <workflow_id>
+  ./trading-cli observability up
+  ./trading-cli observability ui
+  ./trading-cli sports-agent up --mode hitl
+  ./trading-cli sports-agent approve <trace_id>
   ./trading-cli temporal down
   ./trading-cli dev
   ./trading-cli down
@@ -82,6 +91,14 @@ suggest_command() {
   fi
   if [[ "$input" == "temp" || "$input" == "temporal" || "$input" == "debugger" ]]; then
     echo "temporal"
+    return
+  fi
+  if [[ "$input" == "observability" || "$input" == "observe" || "$input" == "obs" ]]; then
+    echo "observability"
+    return
+  fi
+  if [[ "$input" == "sports-agent" || "$input" == "sports" || "$input" == "agent" ]]; then
+    echo "sports-agent"
     return
   fi
 
@@ -179,6 +196,12 @@ test_llm_rules_bot_bin() {
     cargo test --manifest-path "$ROOT_DIR/llm-workflows/llm-rules-bot/Cargo.toml" --bin llm-rules-bot
 }
 
+test_sports_agent() {
+  run_step \
+    "sports-agent worker tests" \
+    cargo test --manifest-path "$ROOT_DIR/observability-platform/sports-agent-worker/Cargo.toml"
+}
+
 test_llm_workflow_inclusive() {
   test_llm_rules_bot
   test_llm_candidate_engine
@@ -198,6 +221,7 @@ run_tests() {
       test_weather_bot
       test_arbitrage_bot
       test_llm_workflow_inclusive
+      test_sports_agent
       ;;
     common)
       test_common
@@ -228,6 +252,9 @@ run_tests() {
       ;;
     llm-rules-bot-bin)
       test_llm_rules_bot_bin
+      ;;
+    sports-agent|sports-agent-worker)
+      test_sports_agent
       ;;
     *)
       echo "Unknown test suite: $suite" >&2
@@ -276,18 +303,63 @@ temporal_server_ui_port() {
   echo "${TEMPORAL_UI_PORT:-8233}"
 }
 
+resolve_cmd() {
+  local name="$1"
+
+  if command -v "$name" >/dev/null 2>&1; then
+    command -v "$name"
+    return 0
+  fi
+
+  if [[ -x "/opt/homebrew/bin/$name" ]]; then
+    echo "/opt/homebrew/bin/$name"
+    return 0
+  fi
+
+  if [[ -x "/usr/local/bin/$name" ]]; then
+    echo "/usr/local/bin/$name"
+    return 0
+  fi
+
+  return 1
+}
+
 require_temporal_cli() {
-  if ! command -v temporal >/dev/null 2>&1; then
+  if ! resolve_cmd temporal >/dev/null 2>&1; then
     echo "Temporal CLI not found. Install with: brew install temporal" >&2
     exit 1
   fi
 }
 
+js_runtime() {
+  if resolve_cmd node >/dev/null 2>&1; then
+    resolve_cmd node
+    return 0
+  fi
+  if resolve_cmd bun >/dev/null 2>&1; then
+    resolve_cmd bun
+    return 0
+  fi
+  return 1
+}
+
+require_js_runtime() {
+  local runtime
+  runtime="$(js_runtime || true)"
+  if [[ -z "$runtime" ]]; then
+    echo "No JS runtime found. Install Node.js 18+ (recommended) or Bun to run observability services." >&2
+    echo "macOS install example: brew install node" >&2
+    exit 1
+  fi
+}
+
 temporal_reachable() {
-  if ! command -v temporal >/dev/null 2>&1; then
+  local temporal_bin
+  temporal_bin="$(resolve_cmd temporal || true)"
+  if [[ -z "$temporal_bin" ]]; then
     return 1
   fi
-  temporal workflow list --address "$(temporal_address)" --limit 1 >/dev/null 2>&1
+  "$temporal_bin" workflow list --address "$(temporal_address)" --limit 1 >/dev/null 2>&1
 }
 
 workflow_mode_to_arg() {
@@ -465,6 +537,9 @@ run_down() {
   stop_service_bg "weather"
   stop_service_bg "arbitrage"
   stop_service_bg "llm-workflow"
+  stop_service_bg "sports-agent"
+  stop_service_bg "trace-api"
+  stop_service_bg "temporal-broker"
   stop_service_bg "temporal"
 }
 
@@ -473,6 +548,9 @@ run_status() {
   service_status_line "weather"
   service_status_line "arbitrage"
   service_status_line "llm-workflow"
+  service_status_line "sports-agent"
+  service_status_line "trace-api"
+  service_status_line "temporal-broker"
   service_status_line "temporal"
 }
 
@@ -481,7 +559,7 @@ run_service_logs() {
   local logfile
   logfile="$(logfile_for "$service")"
   if [[ ! -f "$logfile" ]]; then
-    echo "No log file for $service yet. Start it first with ./trading-cli ${service} up" >&2
+    echo "No log file for $service yet. Start it first and then retry." >&2
     exit 1
   fi
   exec tail -n 120 -f "$logfile"
@@ -653,6 +731,8 @@ run_llm_workflow() {
 run_temporal() {
   local action="${1:-status}"
   shift || true
+  local temporal_bin
+  temporal_bin="$(resolve_cmd temporal || true)"
 
   case "$action" in
     up|start)
@@ -671,7 +751,7 @@ run_temporal() {
         echo "Temporal UI: $(temporal_ui_url)"
         return 0
       fi
-      if ! start_service_bg "temporal" "$ROOT_DIR" temporal server start-dev --ip "$server_ip" --ui-port "$ui_port"; then
+      if ! start_service_bg "temporal" "$ROOT_DIR" "$temporal_bin" server start-dev --ip "$server_ip" --ui-port "$ui_port"; then
         exit 1
       fi
       echo "Temporal address: $(temporal_address)"
@@ -694,7 +774,7 @@ run_temporal() {
       service_status_line "temporal"
       echo "Temporal address: $(temporal_address)"
       echo "Temporal UI: $(temporal_ui_url)"
-      if command -v temporal >/dev/null 2>&1; then
+      if [[ -n "$temporal_bin" ]]; then
         if temporal_reachable; then
           echo "Temporal reachable: yes"
         else
@@ -731,7 +811,7 @@ run_temporal() {
       ;;
     list)
       require_temporal_cli
-      temporal workflow list --address "$(temporal_address)" "$@"
+      "$temporal_bin" workflow list --address "$(temporal_address)" "$@"
       ;;
     describe)
       require_temporal_cli
@@ -741,7 +821,7 @@ run_temporal() {
         exit 1
       fi
       shift || true
-      temporal workflow describe --workflow-id "$workflow_id" --address "$(temporal_address)" "$@"
+      "$temporal_bin" workflow describe --workflow-id "$workflow_id" --address "$(temporal_address)" "$@"
       ;;
     show)
       require_temporal_cli
@@ -751,11 +831,217 @@ run_temporal() {
         exit 1
       fi
       shift || true
-      temporal workflow show --workflow-id "$workflow_id" --address "$(temporal_address)" "$@"
+      "$temporal_bin" workflow show --workflow-id "$workflow_id" --address "$(temporal_address)" "$@"
       ;;
     *)
       echo "Unknown temporal action: $action" >&2
       echo "Use: ./trading-cli temporal [up|down|status|logs|ui|list|describe|show]" >&2
+      exit 1
+      ;;
+  esac
+}
+
+run_observability() {
+  local action="${1:-status}"
+  shift || true
+
+  case "$action" in
+    up|start)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for observability up command" >&2
+        echo "Use: ./trading-cli observability up" >&2
+        exit 1
+      fi
+
+      require_js_runtime
+      run_temporal up
+      mkdir -p "$LOG_DIR"
+      local runtime
+      runtime="$(js_runtime)"
+
+      if ! start_service_bg "temporal-broker" "$ROOT_DIR/observability-platform/temporal-broker" "$runtime" broker.mjs; then
+        exit 1
+      fi
+      if ! start_service_bg "trace-api" "$ROOT_DIR/observability-platform/trace-api" "$runtime" server.mjs; then
+        exit 1
+      fi
+
+      echo "Observability dashboard: http://127.0.0.1:${TRACE_API_PORT:-8791}"
+      echo "Temporal UI: $(temporal_ui_url)"
+      ;;
+    down|stop)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for observability down command" >&2
+        echo "Use: ./trading-cli observability down" >&2
+        exit 1
+      fi
+      stop_service_bg "trace-api"
+      stop_service_bg "temporal-broker"
+      run_temporal down
+      ;;
+    status)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for observability status command" >&2
+        echo "Use: ./trading-cli observability status" >&2
+        exit 1
+      fi
+      service_status_line "trace-api"
+      service_status_line "temporal-broker"
+      run_temporal status
+      echo "Observability dashboard: http://127.0.0.1:${TRACE_API_PORT:-8791}"
+      ;;
+    logs)
+      local service="${1:-trace-api}"
+      if [[ $# -gt 1 ]]; then
+        echo "Too many arguments for observability logs command" >&2
+        echo "Use: ./trading-cli observability logs [trace-api|temporal-broker|temporal]" >&2
+        exit 1
+      fi
+      case "$service" in
+        trace-api|temporal-broker)
+          run_service_logs "$service"
+          ;;
+        temporal)
+          run_temporal logs
+          ;;
+        *)
+          echo "Unknown observability service: $service" >&2
+          echo "Use: ./trading-cli observability logs [trace-api|temporal-broker|temporal]" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    ui)
+      if [[ $# -gt 1 ]]; then
+        echo "Too many arguments for observability ui command" >&2
+        echo "Use: ./trading-cli observability ui [open]" >&2
+        exit 1
+      fi
+      local dashboard_url="http://127.0.0.1:${TRACE_API_PORT:-8791}"
+      echo "Observability dashboard: $dashboard_url"
+      echo "Temporal UI: $(temporal_ui_url)"
+      if [[ "${1:-}" == "open" ]]; then
+        if command -v open >/dev/null 2>&1; then
+          open "$dashboard_url"
+          open "$(temporal_ui_url)"
+        else
+          echo "Open in browser:" >&2
+          echo "  $dashboard_url" >&2
+          echo "  $(temporal_ui_url)" >&2
+        fi
+      fi
+      ;;
+    *)
+      echo "Unknown observability action: $action" >&2
+      echo "Use: ./trading-cli observability [up|down|status|logs|ui]" >&2
+      exit 1
+      ;;
+  esac
+}
+
+run_sports_agent() {
+  local action="${1:-go}"
+  shift || true
+
+  case "$action" in
+    go|run|up|start)
+      local mode="hitl"
+      local dry_run_flag=0
+
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --mode)
+            mode="${2:-}"
+            shift 2
+            ;;
+          --dry-run)
+            dry_run_flag=1
+            shift
+            ;;
+          *)
+            echo "Unknown sports-agent option: $1" >&2
+            echo "Use: ./trading-cli sports-agent [go|up] [--mode <hitl|auto_ultra_strict>] [--dry-run]" >&2
+            exit 1
+            ;;
+        esac
+      done
+
+      case "$mode" in
+        hitl|auto_ultra_strict) ;;
+        *)
+          echo "Invalid sports-agent mode: $mode" >&2
+          echo "Use --mode <hitl|auto_ultra_strict>" >&2
+          exit 1
+          ;;
+      esac
+
+      local cmd=(cargo run -- --mode "$mode")
+      if [[ "$dry_run_flag" -eq 1 ]]; then
+        cmd+=(--dry-run)
+      fi
+
+      if [[ "$action" == "up" || "$action" == "start" ]]; then
+        mkdir -p "$LOG_DIR"
+        if ! start_service_bg "sports-agent" "$ROOT_DIR/observability-platform/sports-agent-worker" "${cmd[@]}"; then
+          exit 1
+        fi
+      else
+        run_in_dir "$ROOT_DIR/observability-platform/sports-agent-worker" "${cmd[@]}"
+      fi
+      ;;
+    down|stop)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for sports-agent down command" >&2
+        echo "Use: ./trading-cli sports-agent down" >&2
+        exit 1
+      fi
+      stop_service_bg "sports-agent"
+      ;;
+    status)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for sports-agent status command" >&2
+        echo "Use: ./trading-cli sports-agent status" >&2
+        exit 1
+      fi
+      service_status_line "sports-agent"
+      ;;
+    logs)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for sports-agent logs command" >&2
+        echo "Use: ./trading-cli sports-agent logs" >&2
+        exit 1
+      fi
+      run_service_logs "sports-agent"
+      ;;
+    approve)
+      local workflow_id="${1:-}"
+      if [[ -z "$workflow_id" ]]; then
+        echo "Missing workflow/trace id. Use: ./trading-cli sports-agent approve <trace_id>" >&2
+        exit 1
+      fi
+      if [[ $# -gt 1 ]]; then
+        echo "Too many arguments for sports-agent approve command" >&2
+        echo "Use: ./trading-cli sports-agent approve <trace_id>" >&2
+        exit 1
+      fi
+      local curl_bin
+      curl_bin="$(resolve_cmd curl || true)"
+      if [[ -z "$curl_bin" ]]; then
+        echo "curl is required for sports-agent approve command" >&2
+        exit 1
+      fi
+
+      local broker_port="${BROKER_PORT:-8787}"
+      "$curl_bin" -fsS \
+        -X POST \
+        "http://127.0.0.1:${broker_port}/execution/${workflow_id}/approve" \
+        -H "content-type: application/json" \
+        -d '{"approved_by":"trading-cli","command_context":"sports-agent-approve"}'
+      echo
+      ;;
+    *)
+      echo "Unknown sports-agent action: $action" >&2
+      echo "Use: ./trading-cli sports-agent [go|up|down|status|logs|approve] [--mode <hitl|auto_ultra_strict>] [--dry-run]" >&2
       exit 1
       ;;
   esac
@@ -785,6 +1071,12 @@ main() {
       ;;
     temporal|temp)
       run_temporal "$@"
+      ;;
+    observability|observe|obs)
+      run_observability "$@"
+      ;;
+    sports-agent|sports)
+      run_sports_agent "$@"
       ;;
     dev)
       run_dev

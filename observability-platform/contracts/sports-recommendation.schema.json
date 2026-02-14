@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trading.local/schemas/sports-recommendation.schema.json",
+  "title": "SportsRecommendation",
+  "type": "object",
+  "required": [
+    "trace_id",
+    "workflow_id",
+    "ticker",
+    "side",
+    "price_limit_cents",
+    "size_contracts",
+    "p_win_posterior",
+    "p_win_lower_bound",
+    "ev_net_cents",
+    "fee_cents_est",
+    "clv_proxy_bps",
+    "mode"
+  ],
+  "properties": {
+    "trace_id": {
+      "type": "string"
+    },
+    "workflow_id": {
+      "type": "string"
+    },
+    "ticker": {
+      "type": "string"
+    },
+    "side": {
+      "type": "string",
+      "enum": [
+        "yes",
+        "no"
+      ]
+    },
+    "price_limit_cents": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 99
+    },
+    "size_contracts": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "p_win_posterior": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "p_win_lower_bound": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "ev_net_cents": {
+      "type": "number"
+    },
+    "fee_cents_est": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "clv_proxy_bps": {
+      "type": "number"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "hitl",
+        "auto_ultra_strict"
+      ]
+    },
+    "rationale": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "signals": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

@@ -19,6 +19,12 @@ Test suites:
   kalshi-client
   weather-bot
   arbitrage-bot
+  llm-rules-bot
+  llm-candidate-engine
+  llm-decision-engine
+  llm-execution-engine
+  llm-client
+  llm-rules-bot-bin
 
 Examples:
   ./trading-cli test
@@ -60,6 +66,42 @@ test_arbitrage_bot() {
     cargo test --manifest-path "$ROOT_DIR/non-agent-workflows/arbitrage-bot/Cargo.toml" --workspace
 }
 
+test_llm_rules_bot() {
+  run_step \
+    "llm-rules-bot workspace tests" \
+    cargo test --manifest-path "$ROOT_DIR/llm-workflows/llm-rules-bot/Cargo.toml" --workspace
+}
+
+test_llm_candidate_engine() {
+  run_step \
+    "llm candidate-engine tests" \
+    cargo test --manifest-path "$ROOT_DIR/llm-workflows/llm-rules-bot/crates/candidate-engine/Cargo.toml"
+}
+
+test_llm_decision_engine() {
+  run_step \
+    "llm decision-engine tests" \
+    cargo test --manifest-path "$ROOT_DIR/llm-workflows/llm-rules-bot/crates/decision-engine/Cargo.toml"
+}
+
+test_llm_execution_engine() {
+  run_step \
+    "llm execution-engine tests" \
+    cargo test --manifest-path "$ROOT_DIR/llm-workflows/llm-rules-bot/crates/execution-engine/Cargo.toml"
+}
+
+test_llm_client() {
+  run_step \
+    "llm client tests" \
+    cargo test --manifest-path "$ROOT_DIR/llm-workflows/llm-rules-bot/crates/llm-client/Cargo.toml"
+}
+
+test_llm_rules_bot_bin() {
+  run_step \
+    "llm-rules-bot binary tests" \
+    cargo test --manifest-path "$ROOT_DIR/llm-workflows/llm-rules-bot/Cargo.toml" --bin llm-rules-bot
+}
+
 run_tests() {
   local suite="${1:-all}"
 
@@ -69,6 +111,12 @@ run_tests() {
       test_kalshi_client
       test_weather_bot
       test_arbitrage_bot
+      test_llm_rules_bot
+      test_llm_candidate_engine
+      test_llm_decision_engine
+      test_llm_execution_engine
+      test_llm_client
+      test_llm_rules_bot_bin
       ;;
     common)
       test_common
@@ -81,6 +129,24 @@ run_tests() {
       ;;
     arbitrage-bot)
       test_arbitrage_bot
+      ;;
+    llm-rules-bot)
+      test_llm_rules_bot
+      ;;
+    llm-candidate-engine)
+      test_llm_candidate_engine
+      ;;
+    llm-decision-engine)
+      test_llm_decision_engine
+      ;;
+    llm-execution-engine)
+      test_llm_execution_engine
+      ;;
+    llm-client)
+      test_llm_client
+      ;;
+    llm-rules-bot-bin)
+      test_llm_rules_bot_bin
       ;;
     *)
       echo "Unknown test suite: $suite" >&2

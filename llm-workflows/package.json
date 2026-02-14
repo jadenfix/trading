@@ -1,12 +1,9 @@
 {
-    "name": "llm-workflows",
-    "version": "1.0.0",
-    "description": "LLM based trading workflows",
-    "main": "index.js",
-    "scripts": {
-        "test": "echo \"Error: no test specified\" && exit 1"
-    },
-    "keywords": [],
-    "author": "",
-    "license": "ISC"
+  "name": "llm-workflows",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LLM trading workflows workspace metadata",
+  "scripts": {
+    "test": "echo \"Use cargo tests in llm-rules-bot\""
+  }
 }

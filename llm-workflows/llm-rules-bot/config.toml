@@ -1,0 +1,59 @@
+# LLM Rules Bot Configuration
+
+[kalshi]
+use_demo = true
+api_base = "https://demo-api.kalshi.co/trade-api/v2"
+# Loaded from env:
+#   KALSHI_API_KEY
+#   KALSHI_SECRET_KEY
+
+[llm]
+provider = "anthropic"
+model = "claude-3-5-sonnet-20240620"
+timeout_ms = 2000
+max_retries = 1
+# api key loaded from ANTHROPIC_API_KEY
+
+[llm_budget]
+daily_max_calls = 400
+per_market_max_calls = 8
+
+[temporal]
+# Optional research trigger backend.
+# When enabled=true, the bot will call a Temporal broker service instead of
+# direct Anthropic requests.
+enabled = false
+broker_base_url = "http://127.0.0.1:8787"
+start_path = "/research/start"
+poll_path_template = "/research/{id}"
+poll_interval_ms = 250
+workflow_timeout_ms = 5000
+request_timeout_ms = 2000
+# Optional bearer token env var for broker auth:
+auth_token_env = ""
+
+[research]
+min_edge_for_research_cents = 3
+complexity_threshold = 0.7
+market_liquidity_min_depth = 10
+max_days_to_expiry = 10
+max_uncertainty = 0.40
+rules_risk_veto_level = "high"
+staleness_budget_ms = 5000
+llm_required_for_complex_markets = false
+kelly_fraction = 0.20
+allowed_urls = []
+
+[trading]
+shadow_mode = true
+live_enable = false
+live_min_size_contracts = 1
+max_position_contracts = 10
+loop_interval_ms = 5000
+
+[risk]
+max_position_cents = 1_000
+max_total_exposure_cents = 5_000
+max_daily_loss_cents = 2_000
+max_orders_per_minute = 10
+min_balance_cents = 100

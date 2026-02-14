@@ -1,25 +1,27 @@
 # LLM Workflows
 
-Workspace for LLM-driven trading research and prototypes.
+Workspace for LLM-driven trading workflows.
 
-## Status
+## Current Workflow
 
-Early scaffold. No production workflows are implemented yet.
+- `llm-rules-bot`: rules-risk and research-triggered workflow with deterministic trade gates.
+  - Supports direct Anthropic research or optional Temporal broker-triggered research.
 
-## Current Contents
+## Safety Model
 
-- `package.json`: placeholder Node workspace config
+- LLM returns structured features only.
+- Deterministic Rust logic owns side, edge, sizing, and execution gating.
+- Shadow mode is default.
 
-## Intended Scope
-
-- market analysis pipelines using LLMs
-- prompt and strategy experimentation
-- evaluation harnesses before promoting ideas to live bots
-
-## Next Setup Step
-
-From repo root:
+## Run
 
 ```bash
-pnpm install
+cd llm-workflows/llm-rules-bot
+cargo run
 ```
+
+Use `config.toml` plus environment variables:
+
+- `KALSHI_API_KEY`
+- `KALSHI_SECRET_KEY`
+- `ANTHROPIC_API_KEY`

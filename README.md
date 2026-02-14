@@ -62,6 +62,7 @@ Workflow command reference:
 bash ./trading-cli weather [go|up|down|status|logs] [prod|dry-run|check-auth]
 bash ./trading-cli arbitrage [go|up|down|status|logs] [prod|dry-run|check-auth]
 bash ./trading-cli llm-workflow [go|up|down|status|logs]
+bash ./trading-cli temporal [up|down|status|logs|ui|list|describe|show]
 ```
 
 Launch all three in background dev mode:
@@ -83,6 +84,31 @@ Direct script is still available:
 
 ```bash
 ./run-bots.sh dry-run
+```
+
+## Temporal Debugger
+
+Use the orchestrator to run and inspect local Temporal while workflows are active:
+
+```bash
+brew install temporal
+bash ./trading-cli temporal up
+bash ./trading-cli temporal status
+bash ./trading-cli temporal ui
+bash ./trading-cli temporal list
+bash ./trading-cli temporal describe <workflow_id>
+bash ./trading-cli temporal show <workflow_id>
+bash ./trading-cli temporal logs
+bash ./trading-cli temporal down
+```
+
+Optional environment overrides:
+
+```bash
+export TEMPORAL_ADDRESS="127.0.0.1:7233"
+export TEMPORAL_SERVER_IP="127.0.0.1"
+export TEMPORAL_UI_IP="127.0.0.1"
+export TEMPORAL_UI_PORT="8233"
 ```
 
 ## Testing

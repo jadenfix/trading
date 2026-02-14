@@ -13,6 +13,7 @@ KNOWN_COMMANDS=(
   weather
   arbitrage
   llm-workflow
+  temporal
   dev
   down
   status
@@ -30,6 +31,7 @@ Commands:
   ./trading-cli weather [go|up|down|status|logs] [prod|dry-run|check-auth]   # deterministic weather orchestrator
   ./trading-cli arbitrage [go|up|down|status|logs] [prod|dry-run|check-auth] # deterministic arbitrage orchestrator
   ./trading-cli llm-workflow [go|up|down|status|logs]                         # llm workflow orchestrator
+  ./trading-cli temporal [up|down|status|logs|ui|list|describe|show]          # temporal debugger/server orchestrator
   ./trading-cli dev                                 # launch weather+arbitrage+llm-workflow (bg)
   ./trading-cli down                                # stop all background services
   ./trading-cli status                              # show all background service statuses
@@ -57,6 +59,11 @@ Examples:
   ./trading-cli arbitrage go check-auth
   ./trading-cli llm-workflow up
   ./trading-cli llm-workflow logs
+  ./trading-cli temporal up
+  ./trading-cli temporal ui
+  ./trading-cli temporal list
+  ./trading-cli temporal describe <workflow_id>
+  ./trading-cli temporal down
   ./trading-cli dev
   ./trading-cli down
 EOF
@@ -71,6 +78,10 @@ suggest_command() {
   fi
   if [[ "$input" == "arb" || "$input" == "arbitrage" ]]; then
     echo "arbitrage"
+    return
+  fi
+  if [[ "$input" == "temp" || "$input" == "temporal" || "$input" == "debugger" ]]; then
+    echo "temporal"
     return
   fi
 
@@ -245,6 +256,38 @@ run_legacy_bots() {
   esac
 
   exec "$RUN_BOTS_SCRIPT" "$mode"
+}
+
+temporal_address() {
+  echo "${TEMPORAL_ADDRESS:-127.0.0.1:7233}"
+}
+
+temporal_ui_url() {
+  local ui_ip="${TEMPORAL_UI_IP:-127.0.0.1}"
+  local ui_port="${TEMPORAL_UI_PORT:-8233}"
+  echo "http://${ui_ip}:${ui_port}"
+}
+
+temporal_server_ip() {
+  echo "${TEMPORAL_SERVER_IP:-127.0.0.1}"
+}
+
+temporal_server_ui_port() {
+  echo "${TEMPORAL_UI_PORT:-8233}"
+}
+
+require_temporal_cli() {
+  if ! command -v temporal >/dev/null 2>&1; then
+    echo "Temporal CLI not found. Install with: brew install temporal" >&2
+    exit 1
+  fi
+}
+
+temporal_reachable() {
+  if ! command -v temporal >/dev/null 2>&1; then
+    return 1
+  fi
+  temporal workflow list --address "$(temporal_address)" --limit 1 >/dev/null 2>&1
 }
 
 workflow_mode_to_arg() {
@@ -422,6 +465,7 @@ run_down() {
   stop_service_bg "weather"
   stop_service_bg "arbitrage"
   stop_service_bg "llm-workflow"
+  stop_service_bg "temporal"
 }
 
 run_status() {
@@ -429,6 +473,7 @@ run_status() {
   service_status_line "weather"
   service_status_line "arbitrage"
   service_status_line "llm-workflow"
+  service_status_line "temporal"
 }
 
 run_service_logs() {
@@ -605,6 +650,117 @@ run_llm_workflow() {
   esac
 }
 
+run_temporal() {
+  local action="${1:-status}"
+  shift || true
+
+  case "$action" in
+    up|start)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for temporal command" >&2
+        echo "Use: ./trading-cli temporal [up|down|status|logs|ui|list|describe|show]" >&2
+        exit 1
+      fi
+      require_temporal_cli
+      mkdir -p "$LOG_DIR"
+      local server_ip ui_port
+      server_ip="$(temporal_server_ip)"
+      ui_port="$(temporal_server_ui_port)"
+      if temporal_reachable; then
+        echo "Temporal server already reachable at $(temporal_address) (external process)."
+        echo "Temporal UI: $(temporal_ui_url)"
+        return 0
+      fi
+      if ! start_service_bg "temporal" "$ROOT_DIR" temporal server start-dev --ip "$server_ip" --ui-port "$ui_port"; then
+        exit 1
+      fi
+      echo "Temporal address: $(temporal_address)"
+      echo "Temporal UI: $(temporal_ui_url)"
+      ;;
+    down|stop)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for temporal command" >&2
+        echo "Use: ./trading-cli temporal down" >&2
+        exit 1
+      fi
+      stop_service_bg "temporal"
+      ;;
+    status)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for temporal command" >&2
+        echo "Use: ./trading-cli temporal status" >&2
+        exit 1
+      fi
+      service_status_line "temporal"
+      echo "Temporal address: $(temporal_address)"
+      echo "Temporal UI: $(temporal_ui_url)"
+      if command -v temporal >/dev/null 2>&1; then
+        if temporal_reachable; then
+          echo "Temporal reachable: yes"
+        else
+          echo "Temporal reachable: no"
+        fi
+      else
+        echo "Temporal reachable: unknown (temporal CLI not installed)"
+      fi
+      ;;
+    logs)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for temporal command" >&2
+        echo "Use: ./trading-cli temporal logs" >&2
+        exit 1
+      fi
+      run_service_logs "temporal"
+      ;;
+    ui)
+      if [[ $# -gt 1 ]]; then
+        echo "Too many arguments for temporal ui command" >&2
+        echo "Use: ./trading-cli temporal ui [open]" >&2
+        exit 1
+      fi
+      local ui_url
+      ui_url="$(temporal_ui_url)"
+      echo "$ui_url"
+      if [[ "${1:-}" == "open" ]]; then
+        if command -v open >/dev/null 2>&1; then
+          open "$ui_url"
+        else
+          echo "Open this URL in your browser: $ui_url" >&2
+        fi
+      fi
+      ;;
+    list)
+      require_temporal_cli
+      temporal workflow list --address "$(temporal_address)" "$@"
+      ;;
+    describe)
+      require_temporal_cli
+      local workflow_id="${1:-}"
+      if [[ -z "$workflow_id" ]]; then
+        echo "Missing workflow id. Use: ./trading-cli temporal describe <workflow_id>" >&2
+        exit 1
+      fi
+      shift || true
+      temporal workflow describe --workflow-id "$workflow_id" --address "$(temporal_address)" "$@"
+      ;;
+    show)
+      require_temporal_cli
+      local workflow_id="${1:-}"
+      if [[ -z "$workflow_id" ]]; then
+        echo "Missing workflow id. Use: ./trading-cli temporal show <workflow_id>" >&2
+        exit 1
+      fi
+      shift || true
+      temporal workflow show --workflow-id "$workflow_id" --address "$(temporal_address)" "$@"
+      ;;
+    *)
+      echo "Unknown temporal action: $action" >&2
+      echo "Use: ./trading-cli temporal [up|down|status|logs|ui|list|describe|show]" >&2
+      exit 1
+      ;;
+  esac
+}
+
 main() {
   local cmd="${1:-}"
   shift || true
@@ -626,6 +782,9 @@ main() {
       ;;
     llm-workflow|llm)
       run_llm_workflow "$@"
+      ;;
+    temporal|temp)
+      run_temporal "$@"
       ;;
     dev)
       run_dev

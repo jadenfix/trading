@@ -1335,10 +1335,11 @@ async fn main() -> Result<()> {
                     error!("cycle {} failed: {}", cycle, e);
                     let mut err_map = serde_json::Map::new();
                     err_map.insert("error".to_string(), serde_json::Value::String(e.to_string()));
+                    let event_payload = serde_json::Value::Object(err_map);
                     journal.write_event(compose_trace_event(
                         &trace,
                         "strategy_cycle_error",
-                        serde_json::Value::Object(err_map),
+                        event_payload,
                     ));
                 }
             }

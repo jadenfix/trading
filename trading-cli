@@ -2,6 +2,23 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_DIR="$ROOT_DIR/.trading-cli"
+DEV_DIR="$STATE_DIR/dev"
+LOG_DIR="$DEV_DIR/logs"
+RUN_BOTS_SCRIPT="$ROOT_DIR/run-bots.sh"
+
+KNOWN_COMMANDS=(
+  help
+  test
+  weather
+  arbitrage
+  llm-workflow
+  temporal
+  dev
+  down
+  status
+  bots
+)
 
 usage() {
   cat <<'EOF'
@@ -9,22 +26,88 @@ Usage:
   ./trading-cli <command> [args]
 
 Commands:
-  test [suite]                     Run tests from the repo root.
-  bots [prod|dry-run|check-auth]   Run non-agent bots through run-bots.sh.
-  help                             Show this help.
+  ./trading-cli help                                # show this help + examples
+  ./trading-cli test [suite]                        # run tests from repo root (inclusive by default)
+  ./trading-cli weather [go|up|down|status|logs] [prod|dry-run|check-auth]   # deterministic weather orchestrator
+  ./trading-cli arbitrage [go|up|down|status|logs] [prod|dry-run|check-auth] # deterministic arbitrage orchestrator
+  ./trading-cli llm-workflow [go|up|down|status|logs]                         # llm workflow orchestrator
+  ./trading-cli temporal [up|down|status|logs|ui|list|describe|show]          # temporal debugger/server orchestrator
+  ./trading-cli dev                                 # launch weather+arbitrage+llm-workflow (bg)
+  ./trading-cli down                                # stop all background services
+  ./trading-cli status                              # show all background service statuses
+  ./trading-cli bots [prod|dry-run|check-auth]      # legacy wrapper for run-bots.sh
 
 Test suites:
-  all (default)
+  all|inclusive (default)
   common
   kalshi-client
-  weather-bot
-  arbitrage-bot
+  weather|weather-bot
+  arbitrage|arbitrage-bot
+  llm-workflow|llm-rules-bot
+  llm-candidate-engine
+  llm-decision-engine
+  llm-execution-engine
+  llm-client
+  llm-rules-bot-bin
 
 Examples:
   ./trading-cli test
+  ./trading-cli test inclusive
   ./trading-cli test weather-bot
-  ./trading-cli bots dry-run
+  ./trading-cli weather go dry-run
+  ./trading-cli weather up check-auth
+  ./trading-cli arbitrage go check-auth
+  ./trading-cli llm-workflow up
+  ./trading-cli llm-workflow logs
+  ./trading-cli temporal up
+  ./trading-cli temporal ui
+  ./trading-cli temporal list
+  ./trading-cli temporal describe <workflow_id>
+  ./trading-cli temporal down
+  ./trading-cli dev
+  ./trading-cli down
 EOF
+}
+
+suggest_command() {
+  local input="$1"
+
+  if [[ "$input" == "llm" || "$input" == "llm-workflow" ]]; then
+    echo "llm-workflow"
+    return
+  fi
+  if [[ "$input" == "arb" || "$input" == "arbitrage" ]]; then
+    echo "arbitrage"
+    return
+  fi
+  if [[ "$input" == "temp" || "$input" == "temporal" || "$input" == "debugger" ]]; then
+    echo "temporal"
+    return
+  fi
+
+  for cmd in "${KNOWN_COMMANDS[@]}"; do
+    if [[ "$cmd" == "$input"* ]]; then
+      echo "$cmd"
+      return
+    fi
+  done
+  for cmd in "${KNOWN_COMMANDS[@]}"; do
+    if [[ "$cmd" == *"$input"* ]]; then
+      echo "$cmd"
+      return
+    fi
+  done
+
+  # Fuzzy fallback: match first 3 chars when available.
+  if [[ "${#input}" -ge 3 ]]; then
+    local prefix="${input:0:3}"
+    for cmd in "${KNOWN_COMMANDS[@]}"; do
+      if [[ "$cmd" == "$prefix"* ]]; then
+        echo "$cmd"
+        return
+      fi
+    done
+  fi
 }
 
 run_step() {
@@ -60,15 +143,61 @@ test_arbitrage_bot() {
     cargo test --manifest-path "$ROOT_DIR/non-agent-workflows/arbitrage-bot/Cargo.toml" --workspace
 }
 
+test_llm_rules_bot() {
+  run_step \
+    "llm-rules-bot workspace tests" \
+    cargo test --manifest-path "$ROOT_DIR/llm-workflows/llm-rules-bot/Cargo.toml" --workspace
+}
+
+test_llm_candidate_engine() {
+  run_step \
+    "llm candidate-engine tests" \
+    cargo test --manifest-path "$ROOT_DIR/llm-workflows/llm-rules-bot/crates/candidate-engine/Cargo.toml"
+}
+
+test_llm_decision_engine() {
+  run_step \
+    "llm decision-engine tests" \
+    cargo test --manifest-path "$ROOT_DIR/llm-workflows/llm-rules-bot/crates/decision-engine/Cargo.toml"
+}
+
+test_llm_execution_engine() {
+  run_step \
+    "llm execution-engine tests" \
+    cargo test --manifest-path "$ROOT_DIR/llm-workflows/llm-rules-bot/crates/execution-engine/Cargo.toml"
+}
+
+test_llm_client() {
+  run_step \
+    "llm client tests" \
+    cargo test --manifest-path "$ROOT_DIR/llm-workflows/llm-rules-bot/crates/llm-client/Cargo.toml"
+}
+
+test_llm_rules_bot_bin() {
+  run_step \
+    "llm-rules-bot binary tests" \
+    cargo test --manifest-path "$ROOT_DIR/llm-workflows/llm-rules-bot/Cargo.toml" --bin llm-rules-bot
+}
+
+test_llm_workflow_inclusive() {
+  test_llm_rules_bot
+  test_llm_candidate_engine
+  test_llm_decision_engine
+  test_llm_execution_engine
+  test_llm_client
+  test_llm_rules_bot_bin
+}
+
 run_tests() {
   local suite="${1:-all}"
 
   case "$suite" in
-    all)
+    all|inclusive)
       test_common
       test_kalshi_client
       test_weather_bot
       test_arbitrage_bot
+      test_llm_workflow_inclusive
       ;;
     common)
       test_common
@@ -76,11 +205,29 @@ run_tests() {
     kalshi-client)
       test_kalshi_client
       ;;
-    weather-bot)
+    weather|weather-bot)
       test_weather_bot
       ;;
-    arbitrage-bot)
+    arbitrage|arbitrage-bot)
       test_arbitrage_bot
+      ;;
+    llm-workflow|llm|llm-rules-bot)
+      test_llm_workflow_inclusive
+      ;;
+    llm-candidate-engine)
+      test_llm_candidate_engine
+      ;;
+    llm-decision-engine)
+      test_llm_decision_engine
+      ;;
+    llm-execution-engine)
+      test_llm_execution_engine
+      ;;
+    llm-client)
+      test_llm_client
+      ;;
+    llm-rules-bot-bin)
+      test_llm_rules_bot_bin
       ;;
     *)
       echo "Unknown test suite: $suite" >&2
@@ -90,7 +237,7 @@ run_tests() {
   esac
 }
 
-run_bots() {
+run_legacy_bots() {
   local mode="${1:-}"
 
   if [[ -z "$mode" ]]; then
@@ -108,25 +255,560 @@ run_bots() {
       ;;
   esac
 
-  exec "$ROOT_DIR/run-bots.sh" "$mode"
+  exec "$RUN_BOTS_SCRIPT" "$mode"
+}
+
+temporal_address() {
+  echo "${TEMPORAL_ADDRESS:-127.0.0.1:7233}"
+}
+
+temporal_ui_url() {
+  local ui_ip="${TEMPORAL_UI_IP:-127.0.0.1}"
+  local ui_port="${TEMPORAL_UI_PORT:-8233}"
+  echo "http://${ui_ip}:${ui_port}"
+}
+
+temporal_server_ip() {
+  echo "${TEMPORAL_SERVER_IP:-127.0.0.1}"
+}
+
+temporal_server_ui_port() {
+  echo "${TEMPORAL_UI_PORT:-8233}"
+}
+
+require_temporal_cli() {
+  if ! command -v temporal >/dev/null 2>&1; then
+    echo "Temporal CLI not found. Install with: brew install temporal" >&2
+    exit 1
+  fi
+}
+
+temporal_reachable() {
+  if ! command -v temporal >/dev/null 2>&1; then
+    return 1
+  fi
+  temporal workflow list --address "$(temporal_address)" --limit 1 >/dev/null 2>&1
+}
+
+workflow_mode_to_arg() {
+  local mode="$1"
+  case "$mode" in
+    prod)
+      echo ""
+      ;;
+    dry-run)
+      echo "--dry-run"
+      ;;
+    check-auth)
+      echo "--check-auth"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+run_in_dir() {
+  local workdir="$1"
+  shift
+  (
+    cd "$workdir"
+    exec "$@"
+  )
+}
+
+pidfile_for() {
+  local service="$1"
+  echo "$DEV_DIR/${service}.pid"
+}
+
+logfile_for() {
+  local service="$1"
+  echo "$LOG_DIR/${service}.log"
+}
+
+is_pid_running() {
+  local pid="$1"
+  kill -0 "$pid" 2>/dev/null
+}
+
+service_status_line() {
+  local service="$1"
+  local pidfile
+  pidfile="$(pidfile_for "$service")"
+  if [[ ! -f "$pidfile" ]]; then
+    printf "%-13s stopped\n" "$service"
+    return
+  fi
+
+  local pid
+  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  if [[ -z "$pid" ]]; then
+    printf "%-13s stopped\n" "$service"
+    rm -f "$pidfile"
+    return
+  fi
+
+  if is_pid_running "$pid"; then
+    printf "%-13s running (pid=%s)\n" "$service" "$pid"
+  else
+    printf "%-13s stopped (stale pid cleaned)\n" "$service"
+    rm -f "$pidfile"
+  fi
+}
+
+start_service_bg() {
+  local service="$1"
+  local workdir="$2"
+  shift 2
+  local pidfile logfile
+  pidfile="$(pidfile_for "$service")"
+  logfile="$(logfile_for "$service")"
+
+  if [[ -f "$pidfile" ]]; then
+    local existing_pid
+    existing_pid="$(cat "$pidfile" 2>/dev/null || true)"
+    if [[ -n "$existing_pid" ]] && is_pid_running "$existing_pid"; then
+      echo "$service already running (pid=$existing_pid)." >&2
+      return 1
+    fi
+    rm -f "$pidfile"
+  fi
+
+  (
+    cd "$workdir"
+    exec "$@"
+  ) >"$logfile" 2>&1 &
+
+  local pid="$!"
+  echo "$pid" > "$pidfile"
+
+  # Quick liveness check for early crashes.
+  sleep 0.3
+  if ! is_pid_running "$pid"; then
+    echo "Failed to start $service. Check log: $logfile" >&2
+    tail -n 40 "$logfile" 2>/dev/null || true
+    rm -f "$pidfile"
+    return 1
+  fi
+
+  echo "Started $service (pid=$pid, log=$logfile)"
+  return 0
+}
+
+run_dev() {
+  mkdir -p "$LOG_DIR"
+
+  if ! start_service_bg "weather" "$ROOT_DIR/non-agent-workflows/weather-bot" cargo run -- --dry-run; then
+    echo "dev startup failed while starting weather" >&2
+    run_down >/dev/null 2>&1 || true
+    exit 1
+  fi
+  if ! start_service_bg "arbitrage" "$ROOT_DIR/non-agent-workflows/arbitrage-bot" cargo run --release -- --dry-run; then
+    echo "dev startup failed while starting arbitrage" >&2
+    run_down >/dev/null 2>&1 || true
+    exit 1
+  fi
+  if ! start_service_bg "llm-workflow" "$ROOT_DIR/llm-workflows/llm-rules-bot" cargo run; then
+    echo "dev startup failed while starting llm-workflow" >&2
+    run_down >/dev/null 2>&1 || true
+    exit 1
+  fi
+
+  echo
+  echo "Development services are up."
+  run_status
+}
+
+stop_service_bg() {
+  local service="$1"
+  local pidfile
+  pidfile="$(pidfile_for "$service")"
+  if [[ ! -f "$pidfile" ]]; then
+    echo "$service already stopped"
+    return
+  fi
+
+  local pid
+  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  if [[ -z "$pid" ]]; then
+    rm -f "$pidfile"
+    echo "$service already stopped"
+    return
+  fi
+
+  if ! is_pid_running "$pid"; then
+    rm -f "$pidfile"
+    echo "$service already stopped (stale pid removed)"
+    return
+  fi
+
+  kill "$pid" 2>/dev/null || true
+  local i
+  for i in {1..20}; do
+    if ! is_pid_running "$pid"; then
+      break
+    fi
+    sleep 0.2
+  done
+
+  if is_pid_running "$pid"; then
+    echo "Force stopping $service (pid=$pid)"
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+
+  rm -f "$pidfile"
+  echo "Stopped $service"
+}
+
+run_down() {
+  stop_service_bg "weather"
+  stop_service_bg "arbitrage"
+  stop_service_bg "llm-workflow"
+  stop_service_bg "temporal"
+}
+
+run_status() {
+  echo "Service status:"
+  service_status_line "weather"
+  service_status_line "arbitrage"
+  service_status_line "llm-workflow"
+  service_status_line "temporal"
+}
+
+run_service_logs() {
+  local service="$1"
+  local logfile
+  logfile="$(logfile_for "$service")"
+  if [[ ! -f "$logfile" ]]; then
+    echo "No log file for $service yet. Start it first with ./trading-cli ${service} up" >&2
+    exit 1
+  fi
+  exec tail -n 120 -f "$logfile"
+}
+
+run_weather() {
+  local action="${1:-go}"
+  local mode="${2:-dry-run}"
+  local mode_arg
+  if [[ $# -gt 2 ]]; then
+    echo "Too many arguments for weather command" >&2
+    echo "Use: ./trading-cli weather [go|up|down|status|logs] [prod|dry-run|check-auth]" >&2
+    exit 1
+  fi
+
+  case "$action" in
+    go|run)
+      if ! mode_arg="$(workflow_mode_to_arg "$mode")"; then
+        echo "Invalid weather mode: $mode" >&2
+        usage
+        exit 1
+      fi
+      if [[ -n "$mode_arg" ]]; then
+        run_in_dir "$ROOT_DIR/non-agent-workflows/weather-bot" cargo run -- "$mode_arg"
+      else
+        run_in_dir "$ROOT_DIR/non-agent-workflows/weather-bot" cargo run
+      fi
+      ;;
+    up|start)
+      if ! mode_arg="$(workflow_mode_to_arg "$mode")"; then
+        echo "Invalid weather mode: $mode" >&2
+        usage
+        exit 1
+      fi
+      mkdir -p "$LOG_DIR"
+      if [[ -n "$mode_arg" ]]; then
+        if ! start_service_bg "weather" "$ROOT_DIR/non-agent-workflows/weather-bot" cargo run -- "$mode_arg"; then
+          exit 1
+        fi
+      else
+        if ! start_service_bg "weather" "$ROOT_DIR/non-agent-workflows/weather-bot" cargo run; then
+          exit 1
+        fi
+      fi
+      ;;
+    down|stop)
+      stop_service_bg "weather"
+      ;;
+    status)
+      service_status_line "weather"
+      ;;
+    logs)
+      run_service_logs "weather"
+      ;;
+    prod|dry-run|check-auth)
+      if [[ $# -gt 1 ]]; then
+        echo "Mode shorthand takes one argument: ./trading-cli weather <prod|dry-run|check-auth>" >&2
+        exit 1
+      fi
+      run_weather go "$action"
+      ;;
+    *)
+      echo "Unknown weather action: $action" >&2
+      echo "Use: ./trading-cli weather [go|up|down|status|logs] [prod|dry-run|check-auth]" >&2
+      exit 1
+      ;;
+  esac
+}
+
+run_arbitrage() {
+  local action="${1:-go}"
+  local mode="${2:-dry-run}"
+  local mode_arg
+  if [[ $# -gt 2 ]]; then
+    echo "Too many arguments for arbitrage command" >&2
+    echo "Use: ./trading-cli arbitrage [go|up|down|status|logs] [prod|dry-run|check-auth]" >&2
+    exit 1
+  fi
+
+  case "$action" in
+    go|run)
+      if ! mode_arg="$(workflow_mode_to_arg "$mode")"; then
+        echo "Invalid arbitrage mode: $mode" >&2
+        usage
+        exit 1
+      fi
+      if [[ -n "$mode_arg" ]]; then
+        run_in_dir "$ROOT_DIR/non-agent-workflows/arbitrage-bot" cargo run --release -- "$mode_arg"
+      else
+        run_in_dir "$ROOT_DIR/non-agent-workflows/arbitrage-bot" cargo run --release
+      fi
+      ;;
+    up|start)
+      if ! mode_arg="$(workflow_mode_to_arg "$mode")"; then
+        echo "Invalid arbitrage mode: $mode" >&2
+        usage
+        exit 1
+      fi
+      mkdir -p "$LOG_DIR"
+      if [[ -n "$mode_arg" ]]; then
+        if ! start_service_bg "arbitrage" "$ROOT_DIR/non-agent-workflows/arbitrage-bot" cargo run --release -- "$mode_arg"; then
+          exit 1
+        fi
+      else
+        if ! start_service_bg "arbitrage" "$ROOT_DIR/non-agent-workflows/arbitrage-bot" cargo run --release; then
+          exit 1
+        fi
+      fi
+      ;;
+    down|stop)
+      stop_service_bg "arbitrage"
+      ;;
+    status)
+      service_status_line "arbitrage"
+      ;;
+    logs)
+      run_service_logs "arbitrage"
+      ;;
+    prod|dry-run|check-auth)
+      if [[ $# -gt 1 ]]; then
+        echo "Mode shorthand takes one argument: ./trading-cli arbitrage <prod|dry-run|check-auth>" >&2
+        exit 1
+      fi
+      run_arbitrage go "$action"
+      ;;
+    *)
+      echo "Unknown arbitrage action: $action" >&2
+      echo "Use: ./trading-cli arbitrage [go|up|down|status|logs] [prod|dry-run|check-auth]" >&2
+      exit 1
+      ;;
+  esac
+}
+
+run_llm_workflow() {
+  local action="${1:-go}"
+  if [[ $# -gt 1 ]]; then
+    echo "Too many arguments for llm-workflow command" >&2
+    echo "Use: ./trading-cli llm-workflow [go|up|down|status|logs]" >&2
+    exit 1
+  fi
+
+  case "$action" in
+    go|run)
+      run_in_dir "$ROOT_DIR/llm-workflows/llm-rules-bot" cargo run
+      ;;
+    up|start)
+      mkdir -p "$LOG_DIR"
+      if ! start_service_bg "llm-workflow" "$ROOT_DIR/llm-workflows/llm-rules-bot" cargo run; then
+        exit 1
+      fi
+      ;;
+    down|stop)
+      stop_service_bg "llm-workflow"
+      ;;
+    status)
+      service_status_line "llm-workflow"
+      ;;
+    logs)
+      run_service_logs "llm-workflow"
+      ;;
+    *)
+      echo "Unknown llm-workflow action: $action" >&2
+      echo "Use: ./trading-cli llm-workflow [go|up|down|status|logs]" >&2
+      exit 1
+      ;;
+  esac
+}
+
+run_temporal() {
+  local action="${1:-status}"
+  shift || true
+
+  case "$action" in
+    up|start)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for temporal command" >&2
+        echo "Use: ./trading-cli temporal [up|down|status|logs|ui|list|describe|show]" >&2
+        exit 1
+      fi
+      require_temporal_cli
+      mkdir -p "$LOG_DIR"
+      local server_ip ui_port
+      server_ip="$(temporal_server_ip)"
+      ui_port="$(temporal_server_ui_port)"
+      if temporal_reachable; then
+        echo "Temporal server already reachable at $(temporal_address) (external process)."
+        echo "Temporal UI: $(temporal_ui_url)"
+        return 0
+      fi
+      if ! start_service_bg "temporal" "$ROOT_DIR" temporal server start-dev --ip "$server_ip" --ui-port "$ui_port"; then
+        exit 1
+      fi
+      echo "Temporal address: $(temporal_address)"
+      echo "Temporal UI: $(temporal_ui_url)"
+      ;;
+    down|stop)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for temporal command" >&2
+        echo "Use: ./trading-cli temporal down" >&2
+        exit 1
+      fi
+      stop_service_bg "temporal"
+      ;;
+    status)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for temporal command" >&2
+        echo "Use: ./trading-cli temporal status" >&2
+        exit 1
+      fi
+      service_status_line "temporal"
+      echo "Temporal address: $(temporal_address)"
+      echo "Temporal UI: $(temporal_ui_url)"
+      if command -v temporal >/dev/null 2>&1; then
+        if temporal_reachable; then
+          echo "Temporal reachable: yes"
+        else
+          echo "Temporal reachable: no"
+        fi
+      else
+        echo "Temporal reachable: unknown (temporal CLI not installed)"
+      fi
+      ;;
+    logs)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for temporal command" >&2
+        echo "Use: ./trading-cli temporal logs" >&2
+        exit 1
+      fi
+      run_service_logs "temporal"
+      ;;
+    ui)
+      if [[ $# -gt 1 ]]; then
+        echo "Too many arguments for temporal ui command" >&2
+        echo "Use: ./trading-cli temporal ui [open]" >&2
+        exit 1
+      fi
+      local ui_url
+      ui_url="$(temporal_ui_url)"
+      echo "$ui_url"
+      if [[ "${1:-}" == "open" ]]; then
+        if command -v open >/dev/null 2>&1; then
+          open "$ui_url"
+        else
+          echo "Open this URL in your browser: $ui_url" >&2
+        fi
+      fi
+      ;;
+    list)
+      require_temporal_cli
+      temporal workflow list --address "$(temporal_address)" "$@"
+      ;;
+    describe)
+      require_temporal_cli
+      local workflow_id="${1:-}"
+      if [[ -z "$workflow_id" ]]; then
+        echo "Missing workflow id. Use: ./trading-cli temporal describe <workflow_id>" >&2
+        exit 1
+      fi
+      shift || true
+      temporal workflow describe --workflow-id "$workflow_id" --address "$(temporal_address)" "$@"
+      ;;
+    show)
+      require_temporal_cli
+      local workflow_id="${1:-}"
+      if [[ -z "$workflow_id" ]]; then
+        echo "Missing workflow id. Use: ./trading-cli temporal show <workflow_id>" >&2
+        exit 1
+      fi
+      shift || true
+      temporal workflow show --workflow-id "$workflow_id" --address "$(temporal_address)" "$@"
+      ;;
+    *)
+      echo "Unknown temporal action: $action" >&2
+      echo "Use: ./trading-cli temporal [up|down|status|logs|ui|list|describe|show]" >&2
+      exit 1
+      ;;
+  esac
 }
 
 main() {
-  local cmd="${1:-help}"
+  local cmd="${1:-}"
   shift || true
+
+  if [[ -z "$cmd" ]]; then
+    usage
+    exit 0
+  fi
 
   case "$cmd" in
     test)
       run_tests "${1:-all}"
       ;;
+    weather)
+      run_weather "$@"
+      ;;
+    arbitrage|arb)
+      run_arbitrage "$@"
+      ;;
+    llm-workflow|llm)
+      run_llm_workflow "$@"
+      ;;
+    temporal|temp)
+      run_temporal "$@"
+      ;;
+    dev)
+      run_dev
+      ;;
+    down)
+      run_down
+      ;;
+    status)
+      run_status
+      ;;
     bots)
-      run_bots "${1:-}"
+      run_legacy_bots "${1:-}"
       ;;
     help|-h|--help)
       usage
       ;;
     *)
       echo "Unknown command: $cmd" >&2
+      local suggestion
+      suggestion="$(suggest_command "$cmd" || true)"
+      if [[ -n "$suggestion" ]]; then
+        echo "Did you mean: ./trading-cli $suggestion" >&2
+      fi
+      echo >&2
       usage
       exit 1
       ;;

@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/*",
+    ".",
+]
+
+[package]
+name = "llm-rules-bot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Local crates
+common = { workspace = true }
+kalshi_client = { workspace = true }
+llm-client = { path = "crates/llm-client" }
+candidate-engine = { path = "crates/candidate-engine" }
+decision-engine = { path = "crates/decision-engine" }
+execution-engine = { path = "crates/execution-engine" }
+
+# External crates
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+toml = "0.8"
+chrono = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }
+
+[workspace.dependencies]
+common = { path = "../../non-agent-workflows/libs/common" }
+kalshi_client = { path = "../../non-agent-workflows/libs/kalshi_client" }
+
+tokio = { version = "1.36", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+governor = "0.6"
+uuid = { version = "1.7", features = ["v4", "serde"] }
+schemars = { version = "0.8", features = ["uuid1"] }

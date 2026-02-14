@@ -6,6 +6,8 @@ Default output paths:
 
 - `TRADES/arbitrage-bot/trades-YYYY-MM-DD.jsonl`
 - `TRADES/weather-bot/trades-YYYY-MM-DD.jsonl`
+- `TRADES/llm-rules-bot/trades-YYYY-MM-DD.jsonl`
+- `TRADES/sports-agent/trades-YYYY-MM-DD.jsonl`
 
 If you set `TRADES_DIR=/custom/path`, the same bot subfolders and files are written under that custom root.
 

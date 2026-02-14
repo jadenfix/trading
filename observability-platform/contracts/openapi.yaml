@@ -1,0 +1,89 @@
+openapi: 3.1.0
+info:
+  title: Trading Observability Platform API
+  version: 0.1.0
+servers:
+  - url: http://127.0.0.1:8791
+paths:
+  /api/traces:
+    get:
+      summary: List trace envelopes
+      parameters:
+        - in: query
+          name: bot
+          schema:
+            type: string
+        - in: query
+          name: status
+          schema:
+            type: string
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: limit
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Trace list
+  /api/traces/{trace_id}:
+    get:
+      summary: Get one trace with events
+      parameters:
+        - in: path
+          name: trace_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Trace envelope + events
+        "404":
+          description: Not found
+  /api/traces/{trace_id}/events:
+    get:
+      summary: Get events for one trace
+      parameters:
+        - in: path
+          name: trace_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Trace events
+        "404":
+          description: Not found
+  /api/traces/{trace_id}/approve:
+    post:
+      summary: Approve a HITL execution for this trace
+      parameters:
+        - in: path
+          name: trace_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                approved_by:
+                  type: string
+                command_context:
+                  type: string
+      responses:
+        "200":
+          description: Approval accepted
+        "404":
+          description: Unknown workflow/trace

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Trading Observability Console</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb orb-a"></div>
+    <div class="bg-orb orb-b"></div>
+    <header class="topbar">
+      <div class="topbar-left">
+        <p class="eyebrow">Observability Platform</p>
+        <h1>Trading Trace Console</h1>
+      </div>
+      <div class="topbar-right">
+        <a id="temporal-link" href="http://127.0.0.1:8233" target="_blank" rel="noreferrer">Temporal UI</a>
+        <button id="refresh-btn" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <section class="controls">
+      <label>
+        Bot
+        <select id="bot-filter">
+          <option value="">All</option>
+        </select>
+      </label>
+      <label>
+        Status
+        <select id="status-filter">
+          <option value="">All</option>
+        </select>
+      </label>
+      <label>
+        Limit
+        <input id="limit-input" type="number" min="10" max="1000" value="200" />
+      </label>
+    </section>
+
+    <section class="panel executed-panel">
+      <div class="panel-head">
+        <h2>Executed Trades</h2>
+        <span id="executed-count">0</span>
+      </div>
+      <div id="executed-list" class="executed-list">
+        <p class="muted">No executed trades yet.</p>
+      </div>
+    </section>
+
+    <main class="grid">
+      <aside class="panel traces-panel">
+        <div class="panel-head">
+          <h2>Traces (Executed First)</h2>
+          <span id="trace-count">0</span>
+        </div>
+        <ul id="trace-list" class="trace-list"></ul>
+      </aside>
+
+      <section class="panel detail-panel">
+        <div class="panel-head">
+          <h2 id="trace-title">Select a trace</h2>
+          <div class="trace-actions">
+            <button id="approve-btn" type="button" hidden>Approve + Execute</button>
+          </div>
+        </div>
+
+        <div id="trace-meta" class="trace-meta"></div>
+
+        <h3>Event Timeline</h3>
+        <div id="event-timeline" class="event-timeline">
+          <p class="muted">No trace selected.</p>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

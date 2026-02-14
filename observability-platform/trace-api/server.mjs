@@ -251,6 +251,9 @@ async function loadTradeEvents() {
       }
       const parsed = safeJsonParse(line);
       if (!parsed || typeof parsed !== "object") {
+        console.warn(
+          `[trace-api] Skipping malformed JSONL in ${file.path} at line ${lineIndex + 1}`
+        );
         continue;
       }
 
@@ -550,7 +553,13 @@ function sendText(res, statusCode, body, contentType = "text/plain; charset=utf-
 
 async function readBodyJson(req) {
   const chunks = [];
+  let totalLength = 0;
   for await (const chunk of req) {
+    totalLength += chunk.length;
+    if (totalLength > 1024 * 1024) {
+      // 1MB limit
+      throw new Error("Request body too large");
+    }
     chunks.push(chunk);
   }
   const raw = Buffer.concat(chunks).toString("utf8").trim();
@@ -699,14 +708,31 @@ async function handleRequest(req, res) {
     if (req.method === "POST" && approveMatch) {
       const traceId = decodeURIComponent(approveMatch[1]);
       const body = await readBodyJson(req);
+
+      let approvedBy =
+        typeof body?.approved_by === "string" ? body.approved_by.trim() : "";
+      if (!approvedBy) {
+        approvedBy = "operator";
+      } else if (approvedBy.length > 256) {
+        approvedBy = approvedBy.slice(0, 256);
+      }
+
+      let commandContext =
+        typeof body?.command_context === "string" ? body.command_context.trim() : "";
+      if (!commandContext) {
+        commandContext = "trace-api";
+      } else if (commandContext.length > 256) {
+        commandContext = commandContext.slice(0, 256);
+      }
+
       const response = await fetch(`${brokerBaseUrl}/execution/${encodeURIComponent(traceId)}/approve`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          approved_by: body.approved_by ?? "operator",
-          command_context: body.command_context ?? "trace-api",
+          approved_by: approvedBy,
+          command_context: commandContext,
         }),
       });
 

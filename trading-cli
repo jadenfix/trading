@@ -35,7 +35,7 @@ Commands:
   ./trading-cli llm-workflow [go|up|down|status|logs]                         # llm workflow orchestrator
   ./trading-cli temporal [up|down|status|logs|ui|list|describe|show]          # temporal debugger/server orchestrator
   ./trading-cli observability [up|down|status|logs|ui] [service]              # observability stack orchestrator
-  ./trading-cli sports-agent [go|up|down|status|logs|approve] [--mode <hitl|auto_ultra_strict>] [--dry-run] [trace_id]
+  ./trading-cli sports-agent [go|up|down|status|logs|approve] [--mode <hitl|auto_ultra_strict>] [--dry-run] <trace_id>
   ./trading-cli dev                                 # launch weather+arbitrage+llm-workflow (bg)
   ./trading-cli down                                # stop all background services
   ./trading-cli status                              # show all background service statuses
@@ -347,7 +347,7 @@ require_js_runtime() {
   local runtime
   runtime="$(js_runtime || true)"
   if [[ -z "$runtime" ]]; then
-    echo "No JS runtime found. Install Node.js 18+ (recommended) or Bun to run observability services." >&2
+    echo "No JS runtime found. Install a JS runtime (for example, Node.js 18+ or Bun) to run observability services." >&2
     echo "macOS install example: brew install node" >&2
     exit 1
   fi

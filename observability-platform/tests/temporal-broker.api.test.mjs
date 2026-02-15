@@ -12,6 +12,9 @@ import {
 
 test("temporal-broker v1 lifecycle endpoints and idempotency", async (t) => {
   if (!(await canBindLocalhost())) {
+    if (process.env.CI === "true") {
+      assert.fail("TCP bind to localhost is unavailable in CI; observability API tests must run in pipeline");
+    }
     t.skip("TCP bind to localhost is not available in this environment");
     return;
   }
@@ -104,6 +107,9 @@ test("temporal-broker v1 lifecycle endpoints and idempotency", async (t) => {
 
 test("temporal-broker rejects oversized JSON bodies", async (t) => {
   if (!(await canBindLocalhost())) {
+    if (process.env.CI === "true") {
+      assert.fail("TCP bind to localhost is unavailable in CI; observability API tests must run in pipeline");
+    }
     t.skip("TCP bind to localhost is not available in this environment");
     return;
   }

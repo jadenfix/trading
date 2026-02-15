@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readLimitedJsonBody } from "../shared/http-json.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,6 +20,7 @@ const stateFile = process.env.BROKER_STATE_FILE
 const auditFile = process.env.BROKER_AUDIT_FILE
   ? path.resolve(process.env.BROKER_AUDIT_FILE)
   : path.join(repoRoot, ".trading-cli", "observability", "control-audit.jsonl");
+const maxBodyBytes = Math.max(1024, Number.parseInt(process.env.BROKER_MAX_BODY_BYTES ?? "1048576", 10) || 1048576);
 
 const TERMINAL_STATUSES = new Set(["executed", "completed", "failed", "canceled_soft", "canceled_hard"]);
 
@@ -181,6 +183,12 @@ function persistState() {
     .then(async () => {
       await ensureStateDir();
       await writeFile(stateFile, JSON.stringify(state, null, 2), "utf8");
+    })
+    .catch((error) => {
+      console.error(
+        `[broker] Failed to persist state to ${stateFile}:`,
+        error instanceof Error ? error.message : String(error),
+      );
     });
   return writeInFlight;
 }
@@ -197,18 +205,7 @@ function appendAudit(entry) {
 }
 
 async function readJsonBody(req) {
-  const chunks = [];
-  for await (const chunk of req) {
-    chunks.push(chunk);
-  }
-  if (chunks.length === 0) {
-    return {};
-  }
-  const raw = Buffer.concat(chunks).toString("utf8").trim();
-  if (!raw) {
-    return {};
-  }
-  return JSON.parse(raw);
+  return readLimitedJsonBody(req, maxBodyBytes);
 }
 
 function getWorkflow(workflowId) {
@@ -925,6 +922,14 @@ async function handleRequest(req, res) {
       message: `No route for ${req.method} ${pathname}`,
     });
   } catch (error) {
+    if (error && typeof error === "object" && Number.isInteger(error.statusCode)) {
+      return sendGoogleError(
+        res,
+        error.statusCode,
+        error.googleStatus ?? "INVALID_ARGUMENT",
+        error.message ?? "Invalid request",
+      );
+    }
     if (error instanceof SyntaxError) {
       return sendGoogleError(res, 400, "INVALID_ARGUMENT", "Invalid JSON payload");
     }

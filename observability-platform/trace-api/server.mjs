@@ -3,6 +3,9 @@ import { createServer } from "node:http";
 import { appendFile, mkdir, readFile, readdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readLimitedJsonBody } from "../shared/http-json.mjs";
+import { pruneLocalOperationCaches as pruneLocalOperationCachesInPlace } from "./local-ops-cache.mjs";
+import { buildApiConfigResponse } from "./config-response.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,6 +29,15 @@ const controlAuditFile = process.env.OBS_CONTROL_AUDIT_FILE
   ? path.resolve(process.env.OBS_CONTROL_AUDIT_FILE)
   : path.join(repoRoot, ".trading-cli", "observability", "control-audit.jsonl");
 const devStateDir = path.join(repoRoot, ".trading-cli", "dev");
+const maxBodyBytes = Math.max(1024, Number.parseInt(process.env.TRACE_API_MAX_BODY_BYTES ?? "1048576", 10) || 1048576);
+const localOpsMaxEntries = Math.max(
+  100,
+  Number.parseInt(process.env.TRACE_API_LOCAL_OPS_MAX_ENTRIES ?? "5000", 10) || 5000,
+);
+const localOpsTtlMs = Math.max(
+  60_000,
+  Number.parseInt(process.env.TRACE_API_LOCAL_OPS_TTL_MS ?? String(24 * 60 * 60 * 1000), 10) || 24 * 60 * 60 * 1000,
+);
 
 const TRACE_START_KINDS = new Set([
   "strategy_cycle_start",
@@ -890,15 +902,7 @@ function sendText(res, statusCode, body, contentType = "text/plain; charset=utf-
 }
 
 async function readBodyJson(req) {
-  const chunks = [];
-  for await (const chunk of req) {
-    chunks.push(chunk);
-  }
-  const raw = Buffer.concat(chunks).toString("utf8").trim();
-  if (!raw) {
-    return {};
-  }
-  return JSON.parse(raw);
+  return readLimitedJsonBody(req, maxBodyBytes);
 }
 
 async function ensureAuditDir() {
@@ -966,6 +970,7 @@ async function fetchBroker(pathname, init = {}) {
 }
 
 function createLocalOperation(project, location, action, target, actor, reason, requestId) {
+  pruneLocalOperationCaches();
   const operationId = `local-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const name = operationResourceName(project, location, operationId);
   const now = nowIso();
@@ -999,10 +1004,18 @@ function completeLocalOperation(operation, responsePayload, errorPayload) {
 }
 
 function listLocalOperations(project, location) {
+  pruneLocalOperationCaches();
   const prefix = `projects/${project}/locations/${location}/operations/`;
   return [...localOperations.values()]
     .filter((operation) => operation.name.startsWith(prefix))
     .sort((left, right) => safeEpoch(right.metadata?.createTime) - safeEpoch(left.metadata?.createTime));
+}
+
+function pruneLocalOperationCaches() {
+  pruneLocalOperationCachesInPlace(localOperations, localRequestIndex, {
+    maxEntries: localOpsMaxEntries,
+    ttlMs: localOpsTtlMs,
+  });
 }
 
 function sleepMs(ms) {
@@ -1161,16 +1174,17 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "GET" && pathname === "/api/config") {
-      return sendJson(res, 200, {
-        broker_base_url: brokerBaseUrl,
-        temporal_ui_url: temporalUiUrl,
-        trace_api_url: `http://${host}:${port}`,
-        api_version: "v1",
-        default_project: defaultProject,
-        default_location: defaultLocation,
-        control_token_required: true,
-        control_token_default: controlToken === "local-dev-token" ? "local-dev-token" : null,
-      });
+      return sendJson(
+        res,
+        200,
+        buildApiConfigResponse({
+          brokerBaseUrl,
+          temporalUiUrl,
+          traceApiUrl: `http://${host}:${port}`,
+          defaultProject,
+          defaultLocation,
+        }),
+      );
     }
 
     const workflowActionMatch = pathname.match(
@@ -1292,6 +1306,7 @@ async function handleRequest(req, res) {
       const location = decodeURIComponent(operationGetMatch[2]);
       const operationId = decodeURIComponent(operationGetMatch[3]);
       const operationName = operationResourceName(project, location, operationId);
+      pruneLocalOperationCaches();
 
       if (localOperations.has(operationName)) {
         return sendJson(res, 200, localOperations.get(operationName));
@@ -1533,6 +1548,14 @@ async function handleRequest(req, res) {
       message: `No route for ${req.method} ${pathname}`,
     });
   } catch (error) {
+    if (error && typeof error === "object" && Number.isInteger(error.statusCode)) {
+      return sendGoogleError(
+        res,
+        error.statusCode,
+        error.googleStatus ?? "INVALID_ARGUMENT",
+        error.message ?? "Invalid request",
+      );
+    }
     if (error instanceof SyntaxError) {
       return sendGoogleError(res, 400, "INVALID_ARGUMENT", "Invalid JSON payload");
     }

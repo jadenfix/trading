@@ -595,7 +595,15 @@ async function handleControlAction(req, res, project, location, workflowId, acti
   let body;
   try {
     body = await readJsonBody(req);
-  } catch {
+  } catch (error) {
+    if (error && typeof error === "object" && Number.isInteger(error.statusCode)) {
+      return sendGoogleError(
+        res,
+        error.statusCode,
+        error.googleStatus ?? "INVALID_ARGUMENT",
+        error.message ?? "Invalid JSON body",
+      );
+    }
     return sendGoogleError(res, 400, "INVALID_ARGUMENT", "Invalid JSON body");
   }
 

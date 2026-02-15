@@ -1194,7 +1194,15 @@ async function handleRequest(req, res) {
       let body;
       try {
         body = await readBodyJson(req);
-      } catch {
+      } catch (error) {
+        if (error && typeof error === "object" && Number.isInteger(error.statusCode)) {
+          return sendGoogleError(
+            res,
+            error.statusCode,
+            error.googleStatus ?? "INVALID_ARGUMENT",
+            error.message ?? "Invalid JSON payload",
+          );
+        }
         return sendGoogleError(res, 400, "INVALID_ARGUMENT", "Invalid JSON payload");
       }
 
@@ -1241,7 +1249,15 @@ async function handleRequest(req, res) {
       let body;
       try {
         body = await readBodyJson(req);
-      } catch {
+      } catch (error) {
+        if (error && typeof error === "object" && Number.isInteger(error.statusCode)) {
+          return sendGoogleError(
+            res,
+            error.statusCode,
+            error.googleStatus ?? "INVALID_ARGUMENT",
+            error.message ?? "Invalid JSON payload",
+          );
+        }
         return sendGoogleError(res, 400, "INVALID_ARGUMENT", "Invalid JSON payload");
       }
 

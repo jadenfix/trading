@@ -4,7 +4,7 @@ Monorepo for four trading/automation tracks:
 
 - agent-style workflows (`clawdbot-workflows`)
 - deterministic Rust bots (`non-agent-workflows`)
-- LLM research workflow (`llm-workflows`)
+- LLM workflow (`llm-workflows`)
 - unified observability + sports agent stack (`observability-platform`)
 
 ## Workspace Map
@@ -14,27 +14,29 @@ Monorepo for four trading/automation tracks:
 | [`clawdbot-workflows`](./clawdbot-workflows) | Imported OpenClaw-based agent framework and gateway stack | [`clawdbot-workflows/README.md`](./clawdbot-workflows/README.md) |
 | [`non-agent-workflows`](./non-agent-workflows) | Kalshi-focused Rust bots (weather + arbitrage) | [`non-agent-workflows/README.md`](./non-agent-workflows/README.md) |
 | [`llm-workflows`](./llm-workflows) | LLM trading experiments and prototypes | [`llm-workflows/README.md`](./llm-workflows/README.md) |
-| [`observability-platform`](./observability-platform) | Unified traces, brokered approvals, dashboard, and sports agent worker | [`observability-platform/README.md`](./observability-platform/README.md) |
+| [`observability-platform`](./observability-platform) | Unified traces, Google-style control API, dashboard, sports worker | [`observability-platform/README.md`](./observability-platform/README.md) |
 
-## Architecture (High-Level)
+## Architecture (High Level)
 
 ```text
-weather/arbitrage/llm-rules + sports-agent
-             | 
-             v
+weather/arbitrage/llm-rules/sports-agent
+                |
+                v
       TRADES/* JSONL + broker state
-             |
-             v
-      trace-api (unified traces)
-             |
-             v
-   dashboard (timeline + approvals)
+                |
+                v
+         trace-api (:8791)
+   /v1/projects/*/locations/*/...
+                |
+                v
+   dashboard (executions first + actions)
 
-Temporal runs alongside for workflow inspection:
-- Temporal server + UI via `trading-cli temporal ...`
+temporal-broker (:8787) stores workflow state machine + operations.
+Temporal UI runs in parallel for workflow inspection.
 ```
 
 Detailed architecture:
+
 - [`observability-platform/docs/architecture.md`](./observability-platform/docs/architecture.md)
 
 ## Quick Start
@@ -65,10 +67,17 @@ export SPORTS_DATA_IO_API_KEY="your-sportsdataio-key"
 export THE_ODDS_API_KEY="your-theodds-key"
 ```
 
+Control token (recommended):
+
+```bash
+export OBS_CONTROL_TOKEN="replace-me"
+```
+
+If unset, local default is `local-dev-token`.
+
 ### 3) Start observability stack
 
 ```bash
-brew install temporal
 bash ./trading-cli observability up
 bash ./trading-cli observability status
 bash ./trading-cli observability ui
@@ -94,8 +103,17 @@ Run sports agent:
 # Human-in-the-loop mode
 bash ./trading-cli sports-agent up --mode hitl
 
-# Approve pending workflow when ready
-bash ./trading-cli sports-agent approve <trace_id>
+# Execute pending recommendation
+bash ./trading-cli sports-agent execute <workflow_id>
+
+# Cancel
+bash ./trading-cli sports-agent cancel <workflow_id>
+
+# Hard cancel
+bash ./trading-cli sports-agent cancel <workflow_id> --hard
+
+# Stop sports-agent managed process via control API
+bash ./trading-cli sports-agent stop-service
 
 # Ultra strict auto mode
 bash ./trading-cli sports-agent up --mode auto_ultra_strict
@@ -104,7 +122,7 @@ bash ./trading-cli sports-agent up --mode auto_ultra_strict
 ### 5) View traces
 
 - Dashboard: `http://127.0.0.1:8791`
-- Trace API: `http://127.0.0.1:8791/api/traces`
+- Workflows API: `http://127.0.0.1:8791/v1/projects/local/locations/us-central1/workflows`
 - Temporal UI: `http://127.0.0.1:8233`
 
 ### 6) Stop services
@@ -121,7 +139,7 @@ bash ./trading-cli arbitrage [go|up|down|status|logs] [prod|dry-run|check-auth]
 bash ./trading-cli llm-workflow [go|up|down|status|logs]
 bash ./trading-cli temporal [up|down|status|logs|ui|list|describe|show]
 bash ./trading-cli observability [up|down|status|logs|ui] [trace-api|temporal-broker|temporal]
-bash ./trading-cli sports-agent [go|up|down|status|logs|approve] [--mode <hitl|auto_ultra_strict>] [--dry-run] [trace_id]
+bash ./trading-cli sports-agent [go|up|down|status|logs|approve|execute|cancel|hard-cancel|stop-service] [--mode <hitl|auto_ultra_strict>] [--dry-run] [trace_id]
 bash ./trading-cli dev
 bash ./trading-cli status
 bash ./trading-cli down
@@ -130,7 +148,6 @@ bash ./trading-cli down
 ## Temporal Debugger
 
 ```bash
-brew install temporal
 bash ./trading-cli temporal up
 bash ./trading-cli temporal status
 bash ./trading-cli temporal ui
@@ -152,7 +169,7 @@ export TEMPORAL_UI_PORT="8233"
 
 ## Testing
 
-Run all current test suites from repo root:
+Run all suites from repo root:
 
 ```bash
 bash ./trading-cli test
@@ -181,8 +198,6 @@ Path: [`non-agent-workflows/weather-bot`](./non-agent-workflows/weather-bot)
 - applies quality + risk gates before order intents
 - writes runtime JSONL events to `TRADES/weather-bot`
 
-Details: [`non-agent-workflows/weather-bot/README.md`](./non-agent-workflows/weather-bot/README.md)
-
 ### Arbitrage Bot
 
 Path: [`non-agent-workflows/arbitrage-bot`](./non-agent-workflows/arbitrage-bot)
@@ -191,8 +206,6 @@ Path: [`non-agent-workflows/arbitrage-bot`](./non-agent-workflows/arbitrage-bot)
 - scans Buy-Set and Sell-Set opportunities
 - executes grouped orders with strict risk checks
 - writes runtime JSONL events to `TRADES/arbitrage-bot`
-
-Details: [`non-agent-workflows/arbitrage-bot/README.md`](./non-agent-workflows/arbitrage-bot/README.md)
 
 ### Sports Agent Worker
 
@@ -203,11 +216,9 @@ Path: [`observability-platform/sports-agent-worker`](./observability-platform/sp
 - supports `hitl` and `auto_ultra_strict` execution modes
 - writes runtime JSONL events to `TRADES/sports-agent`
 
-Details: [`observability-platform/sports-agent-worker/README.md`](./observability-platform/sports-agent-worker/README.md)
-
 ## Logs and Journals
 
-By default, trade logs are written under:
+Default trade logs:
 
 - `TRADES/arbitrage-bot`
 - `TRADES/weather-bot`
@@ -215,12 +226,3 @@ By default, trade logs are written under:
 - `TRADES/sports-agent`
 
 Use `TRADES_DIR=/custom/path` to change the root folder.
-
-## Contributing
-
-Before opening a pull request:
-
-1. Keep changes scoped to relevant workspace(s).
-2. Run tests from repo root with `bash ./trading-cli test`.
-3. Update docs/READMEs when commands or behavior change.
-4. Include a PR description covering what changed, why, and how it was tested.

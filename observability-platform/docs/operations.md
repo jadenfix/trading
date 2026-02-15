@@ -5,6 +5,7 @@
 From repo root:
 
 ```bash
+export OBS_CONTROL_TOKEN="replace-me"   # optional but recommended
 bash ./trading-cli observability up
 bash ./trading-cli sports-agent up --mode hitl
 bash ./trading-cli status
@@ -19,37 +20,45 @@ bash ./trading-cli observability logs temporal-broker
 bash ./trading-cli sports-agent logs
 ```
 
-## Common Workflows
+## Common Control Workflows
 
-### HITL Research + Execute
+### HITL Execute
 
 ```bash
-bash ./trading-cli sports-agent up --mode hitl
-bash ./trading-cli observability ui
-bash ./trading-cli sports-agent approve <trace_id>
+bash ./trading-cli sports-agent execute <workflow_id>
 ```
 
-### Ultra-Strict Auto Mode
+### Soft Cancel
 
 ```bash
-bash ./trading-cli sports-agent up --mode auto_ultra_strict
+bash ./trading-cli sports-agent cancel <workflow_id>
+```
+
+### Hard Cancel
+
+```bash
+bash ./trading-cli sports-agent cancel <workflow_id> --hard
+```
+
+### Stop Managed Service
+
+```bash
+bash ./trading-cli sports-agent stop-service
 ```
 
 ## Troubleshooting
 
-1. `trace-api` shows no traces:
-   - verify `TRADES/` has JSONL files
-   - check `bash ./trading-cli observability logs trace-api`
-2. approvals do nothing:
-   - verify broker is running
-   - check `http://127.0.0.1:8787/health`
-   - check workflow exists in `.trading-cli/observability/broker-state.json`
-3. sports worker not trading:
-   - confirm `THE_ODDS_API_KEY` is set
-   - confirm Kalshi auth env vars are valid
-   - inspect `TRADES/sports-agent/*.jsonl` for gate rejection reasons
-4. Temporal UI unavailable:
-   - run `bash ./trading-cli temporal status`
+1. Dashboard shows `RUNNING` but process is down:
+   - Check `runtimeState` card in detail panel.
+   - Verify with `bash ./trading-cli status`.
+2. Control actions return `UNAUTHENTICATED`:
+   - Ensure token in env and dashboard token input match:
+     - `OBS_CONTROL_TOKEN`
+3. No traces visible:
+   - Verify JSONL files under `TRADES/*`.
+   - Check `bash ./trading-cli observability logs trace-api`.
+4. Workflow action rejected:
+   - Inspect workflow `state` and `availableActions` in dashboard/API.
 
 ## Stop Services
 

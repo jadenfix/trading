@@ -49,7 +49,20 @@
         "approved",
         "completed",
         "executed",
-        "failed"
+        "failed",
+        "canceled_soft",
+        "canceled_hard"
+      ]
+    },
+    "state": {
+      "type": "string"
+    },
+    "runtime_state": {
+      "type": "string",
+      "enum": [
+        "PROCESS_RUNNING",
+        "PROCESS_STOPPED",
+        "UNKNOWN"
       ]
     },
     "requires_approval": {
@@ -65,6 +78,22 @@
     "event_count": {
       "type": "integer",
       "minimum": 0
+    },
+    "executed_trade_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "cancel_state": {
+      "type": "string"
+    },
+    "control_locked": {
+      "type": "boolean"
+    },
+    "available_actions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     }
   },
   "additionalProperties": true

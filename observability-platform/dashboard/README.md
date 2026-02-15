@@ -1,33 +1,46 @@
 # Dashboard
 
-Browser UI for unified workflow traces.
+Browser UI for unified workflow traces and control actions.
 
 ## What You Can Do
 
-- View cross-bot trace list in one screen.
-- See an execution-first strip that shows actual executed trades first.
-- Inspect per-trace event timeline and payloads.
-- See Temporal UI deep-link from header.
-- Approve HITL traces directly from UI (`Approve + Execute`).
+- See executed trades first (`Executed Trades` strip).
+- Inspect cross-bot workflow traces and timelines.
+- View lifecycle `state` and process `runtimeState` side-by-side.
+- Execute / soft-cancel / hard-cancel workflows.
+- Stop the managed `sports-agent` service.
+- Jump to Temporal UI from the header.
 
 ## Run
 
-Use orchestrator from repo root:
+From repo root:
 
 ```bash
 bash ./trading-cli observability up
 bash ./trading-cli observability ui
 ```
 
-The dashboard is served by trace API on:
+Dashboard URL:
 
 - `http://127.0.0.1:8791`
 
-## Data Source
+## Control Auth
 
-The dashboard reads from:
+Set token before using control buttons:
 
-- `GET /api/traces`
-- `GET /api/traces/{trace_id}`
-- `GET /api/traces/{trace_id}/events`
-- `POST /api/traces/{trace_id}/approve`
+```bash
+export OBS_CONTROL_TOKEN="your-local-token"
+```
+
+If unset, local default is `local-dev-token`.
+
+The UI includes a `Control Token` input (stored in local browser storage).
+
+## Data Sources
+
+- `GET /v1/projects/*/locations/*/workflows`
+- `GET /v1/projects/*/locations/*/workflows/*`
+- `GET /v1/projects/*/locations/*/workflows/*/events`
+- `GET /v1/projects/*/locations/*/executions`
+- `POST /v1/projects/*/locations/*/workflows/*:execute|:cancel|:hardCancel`
+- `POST /v1/projects/*/locations/*/services/sports-agent:stop`

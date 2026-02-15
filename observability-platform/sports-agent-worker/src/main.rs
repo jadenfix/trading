@@ -213,6 +213,14 @@ struct TraceContext {
     cycle: u64,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ApprovalDecision {
+    Approved,
+    TimedOut,
+    CanceledSoft,
+    CanceledHard,
+}
+
 struct TradeJournal {
     dir: PathBuf,
     day_key: String,
@@ -856,9 +864,13 @@ async fn broker_append_event(
     }
 }
 
-async fn broker_is_approved(http: &reqwest::Client, base_url: &str, workflow_id: &str) -> bool {
+async fn broker_workflow_snapshot(
+    http: &reqwest::Client,
+    base_url: &str,
+    workflow_id: &str,
+) -> Option<Value> {
     let url = format!(
-        "{}/execution/{}/approval",
+        "{}/workflows/{}",
         base_url.trim_end_matches('/'),
         workflow_id
     );
@@ -866,26 +878,64 @@ async fn broker_is_approved(http: &reqwest::Client, base_url: &str, workflow_id:
     let response = match http.get(url).send().await {
         Ok(resp) => resp,
         Err(e) => {
-            warn!("approval poll failed: {}", e);
-            return false;
+            warn!("workflow poll failed: {}", e);
+            return None;
         }
     };
 
     if !response.status().is_success() {
-        return false;
+        return None;
     }
 
-    let body = match response.json::<Value>().await {
-        Ok(payload) => payload,
+    match response.json::<Value>().await {
+        Ok(payload) => Some(payload),
         Err(e) => {
-            warn!("approval decode failed: {}", e);
-            return false;
+            warn!("workflow poll decode failed: {}", e);
+            None
         }
-    };
+    }
+}
 
-    body.get("approved")
+fn snapshot_approved(snapshot: &Value) -> bool {
+    snapshot
+        .get("approval")
+        .and_then(|v| v.get("approved"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
+        || snapshot
+            .get("approved")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+fn snapshot_status(snapshot: &Value) -> String {
+    snapshot
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+fn snapshot_cancel_state(snapshot: &Value) -> String {
+    snapshot
+        .get("cancel_state")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+fn snapshot_cancel_decision(snapshot: &Value) -> Option<ApprovalDecision> {
+    let status = snapshot_status(snapshot);
+    let cancel_state = snapshot_cancel_state(snapshot);
+
+    if status == "canceled_hard" || cancel_state == "hard_requested" {
+        return Some(ApprovalDecision::CanceledHard);
+    }
+    if status == "canceled_soft" || cancel_state == "soft_requested" {
+        return Some(ApprovalDecision::CanceledSoft);
+    }
+
+    None
 }
 
 async fn wait_for_approval(
@@ -893,18 +943,32 @@ async fn wait_for_approval(
     base_url: &str,
     workflow_id: &str,
     timeout_secs: u64,
-) -> bool {
+) -> ApprovalDecision {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
     loop {
-        if broker_is_approved(http, base_url, workflow_id).await {
-            return true;
+        if let Some(snapshot) = broker_workflow_snapshot(http, base_url, workflow_id).await {
+            if snapshot_approved(&snapshot) {
+                return ApprovalDecision::Approved;
+            }
+            if let Some(decision) = snapshot_cancel_decision(&snapshot) {
+                return decision;
+            }
         }
         if Instant::now() >= deadline {
-            return false;
+            return ApprovalDecision::TimedOut;
         }
         sleep(Duration::from_secs(2)).await;
     }
+}
+
+async fn broker_current_cancel_decision(
+    http: &reqwest::Client,
+    base_url: &str,
+    workflow_id: &str,
+) -> Option<ApprovalDecision> {
+    let snapshot = broker_workflow_snapshot(http, base_url, workflow_id).await?;
+    snapshot_cancel_decision(&snapshot)
 }
 
 async fn execute_candidate(
@@ -1137,7 +1201,7 @@ async fn run_cycle(
             json!({"timeout_secs": cli.hitl_wait_secs}),
         ));
 
-        let approved = wait_for_approval(
+        let approval_decision = wait_for_approval(
             http_client,
             &cli.broker_base_url,
             &trace.workflow_id,
@@ -1145,28 +1209,63 @@ async fn run_cycle(
         )
         .await;
 
-        if !approved {
-            journal.write_event(compose_trace_event(
-                trace,
-                "approval_timeout",
-                json!({"timeout_secs": cli.hitl_wait_secs}),
-            ));
-            broker_complete(
-                http_client,
-                &cli.broker_base_url,
-                &trace.workflow_id,
-                "awaiting_approval",
-                &json!({"status": "approval_timeout"}),
-            )
-            .await;
-            return Ok(());
+        match approval_decision {
+            ApprovalDecision::Approved => {
+                journal.write_event(compose_trace_event(
+                    trace,
+                    "execution_approved",
+                    json!({"approved": true}),
+                ));
+            }
+            ApprovalDecision::TimedOut => {
+                journal.write_event(compose_trace_event(
+                    trace,
+                    "approval_timeout",
+                    json!({"timeout_secs": cli.hitl_wait_secs}),
+                ));
+                broker_complete(
+                    http_client,
+                    &cli.broker_base_url,
+                    &trace.workflow_id,
+                    "awaiting_approval",
+                    &json!({"status": "approval_timeout"}),
+                )
+                .await;
+                return Ok(());
+            }
+            ApprovalDecision::CanceledSoft => {
+                journal.write_event(compose_trace_event(
+                    trace,
+                    "workflow_canceled_soft",
+                    json!({"reason": "cancel_requested_soft"}),
+                ));
+                broker_complete(
+                    http_client,
+                    &cli.broker_base_url,
+                    &trace.workflow_id,
+                    "canceled_soft",
+                    &json!({"status": "canceled_soft"}),
+                )
+                .await;
+                return Ok(());
+            }
+            ApprovalDecision::CanceledHard => {
+                journal.write_event(compose_trace_event(
+                    trace,
+                    "workflow_canceled_hard",
+                    json!({"reason": "cancel_requested_hard"}),
+                ));
+                broker_complete(
+                    http_client,
+                    &cli.broker_base_url,
+                    &trace.workflow_id,
+                    "canceled_hard",
+                    &json!({"status": "canceled_hard"}),
+                )
+                .await;
+                return Ok(());
+            }
         }
-
-        journal.write_event(compose_trace_event(
-            trace,
-            "execution_approved",
-            json!({"approved": true}),
-        ));
     } else {
         broker_register(
             http_client,
@@ -1177,6 +1276,33 @@ async fn run_cycle(
             &recommendation,
         )
         .await;
+    }
+
+    if let Some(decision) =
+        broker_current_cancel_decision(http_client, &cli.broker_base_url, &trace.workflow_id).await
+    {
+        let (status, kind) = match decision {
+            ApprovalDecision::CanceledSoft => ("canceled_soft", "workflow_canceled_soft"),
+            ApprovalDecision::CanceledHard => ("canceled_hard", "workflow_canceled_hard"),
+            _ => ("completed", "workflow_control_state"),
+        };
+
+        if status.starts_with("canceled_") {
+            journal.write_event(compose_trace_event(
+                trace,
+                kind,
+                json!({"reason": "cancel_requested_before_execution"}),
+            ));
+            broker_complete(
+                http_client,
+                &cli.broker_base_url,
+                &trace.workflow_id,
+                status,
+                &json!({"status": status}),
+            )
+            .await;
+            return Ok(());
+        }
     }
 
     let execution_result = execute_candidate(cli, rest_client, &best).await;
@@ -1358,6 +1484,6 @@ async fn main() -> Result<()> {
             }
         }
     }
-    
+
     Ok(())
 }

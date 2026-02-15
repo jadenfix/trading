@@ -46,10 +46,12 @@ bash ./trading-cli sports-agent up --mode hitl
 bash ./trading-cli sports-agent logs
 ```
 
-Approve a pending HITL workflow:
+Control a HITL workflow:
 
 ```bash
-bash ./trading-cli sports-agent approve <workflow_id_or_trace_id>
+bash ./trading-cli sports-agent execute <workflow_id_or_trace_id>
+bash ./trading-cli sports-agent cancel <workflow_id_or_trace_id>
+bash ./trading-cli sports-agent cancel <workflow_id_or_trace_id> --hard
 ```
 
 ## Output

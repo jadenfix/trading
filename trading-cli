@@ -35,7 +35,7 @@ Commands:
   ./trading-cli llm-workflow [go|up|down|status|logs]                         # llm workflow orchestrator
   ./trading-cli temporal [up|down|status|logs|ui|list|describe|show]          # temporal debugger/server orchestrator
   ./trading-cli observability [up|down|status|logs|ui] [service]              # observability stack orchestrator
-  ./trading-cli sports-agent [go|up|down|status|logs|approve] [--mode <hitl|auto_ultra_strict>] [--dry-run] <trace_id>
+  ./trading-cli sports-agent [go|up|down|status|logs|approve|execute|cancel|hard-cancel|stop-service] [--mode <hitl|auto_ultra_strict>] [--dry-run] <trace_id>
   ./trading-cli dev                                 # launch weather+arbitrage+llm-workflow (bg)
   ./trading-cli down                                # stop all background services
   ./trading-cli status                              # show all background service statuses
@@ -71,7 +71,10 @@ Examples:
   ./trading-cli observability up
   ./trading-cli observability ui
   ./trading-cli sports-agent up --mode hitl
-  ./trading-cli sports-agent approve <trace_id>
+  ./trading-cli sports-agent execute <trace_id>
+  ./trading-cli sports-agent cancel <trace_id>
+  ./trading-cli sports-agent cancel <trace_id> --hard
+  ./trading-cli sports-agent stop-service
   ./trading-cli temporal down
   ./trading-cli dev
   ./trading-cli down
@@ -939,6 +942,72 @@ run_observability() {
   esac
 }
 
+observability_api_url() {
+  echo "http://127.0.0.1:${TRACE_API_PORT:-8791}"
+}
+
+observability_project() {
+  echo "${OBS_PROJECT:-local}"
+}
+
+observability_location() {
+  echo "${OBS_LOCATION:-us-central1}"
+}
+
+observability_control_token() {
+  echo "${OBS_CONTROL_TOKEN:-local-dev-token}"
+}
+
+sports_agent_control_request() {
+  local method="$1"
+  local endpoint="$2"
+  local payload="$3"
+
+  local curl_bin
+  curl_bin="$(resolve_cmd curl || true)"
+  if [[ -z "$curl_bin" ]]; then
+    echo "curl is required for sports-agent control commands" >&2
+    return 1
+  fi
+
+  "$curl_bin" -fsS \
+    -X "$method" \
+    "$(observability_api_url)$endpoint" \
+    -H "authorization: Bearer $(observability_control_token)" \
+    -H "content-type: application/json" \
+    -d "$payload"
+}
+
+sports_agent_workflow_action() {
+  local workflow_id="$1"
+  local action="$2"
+  local reason="$3"
+
+  local project location request_id
+  project="$(observability_project)"
+  location="$(observability_location)"
+  request_id="trading-cli-$(date +%s)-$RANDOM"
+
+  sports_agent_control_request \
+    POST \
+    "/v1/projects/${project}/locations/${location}/workflows/${workflow_id}:${action}" \
+    "{\"actor\":\"trading-cli\",\"reason\":\"${reason}\",\"requestId\":\"${request_id}\"}"
+  echo
+}
+
+sports_agent_stop_service_action() {
+  local project location request_id
+  project="$(observability_project)"
+  location="$(observability_location)"
+  request_id="trading-cli-$(date +%s)-$RANDOM"
+
+  sports_agent_control_request \
+    POST \
+    "/v1/projects/${project}/locations/${location}/services/sports-agent:stop" \
+    "{\"actor\":\"trading-cli\",\"reason\":\"manual service stop from trading-cli\",\"requestId\":\"${request_id}\"}"
+  echo
+}
+
 run_sports_agent() {
   local action="${1:-go}"
   shift || true
@@ -1013,35 +1082,72 @@ run_sports_agent() {
       fi
       run_service_logs "sports-agent"
       ;;
-    approve)
+    execute|approve)
       local workflow_id="${1:-}"
       if [[ -z "$workflow_id" ]]; then
-        echo "Missing workflow/trace id. Use: ./trading-cli sports-agent approve <trace_id>" >&2
+        echo "Missing workflow/trace id. Use: ./trading-cli sports-agent execute <trace_id>" >&2
         exit 1
       fi
       if [[ $# -gt 1 ]]; then
-        echo "Too many arguments for sports-agent approve command" >&2
-        echo "Use: ./trading-cli sports-agent approve <trace_id>" >&2
+        echo "Too many arguments for sports-agent execute command" >&2
+        echo "Use: ./trading-cli sports-agent execute <trace_id>" >&2
         exit 1
       fi
-      local curl_bin
-      curl_bin="$(resolve_cmd curl || true)"
-      if [[ -z "$curl_bin" ]]; then
-        echo "curl is required for sports-agent approve command" >&2
+      sports_agent_workflow_action "$workflow_id" "execute" "manual execute from trading-cli"
+      ;;
+    cancel)
+      local workflow_id="${1:-}"
+      if [[ -z "$workflow_id" ]]; then
+        echo "Missing workflow id. Use: ./trading-cli sports-agent cancel <trace_id> [--hard]" >&2
         exit 1
       fi
+      shift || true
 
-      local broker_port="${BROKER_PORT:-8787}"
-      "$curl_bin" -fsS \
-        -X POST \
-        "http://127.0.0.1:${broker_port}/execution/${workflow_id}/approve" \
-        -H "content-type: application/json" \
-        -d '{"approved_by":"trading-cli","command_context":"sports-agent-approve"}'
-      echo
+      local hard_cancel_flag=0
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --hard)
+            hard_cancel_flag=1
+            shift
+            ;;
+          *)
+            echo "Unknown sports-agent cancel option: $1" >&2
+            echo "Use: ./trading-cli sports-agent cancel <trace_id> [--hard]" >&2
+            exit 1
+            ;;
+        esac
+      done
+
+      if [[ "$hard_cancel_flag" -eq 1 ]]; then
+        sports_agent_workflow_action "$workflow_id" "hardCancel" "manual hard cancel from trading-cli"
+      else
+        sports_agent_workflow_action "$workflow_id" "cancel" "manual soft cancel from trading-cli"
+      fi
+      ;;
+    hard-cancel)
+      local workflow_id="${1:-}"
+      if [[ -z "$workflow_id" ]]; then
+        echo "Missing workflow id. Use: ./trading-cli sports-agent hard-cancel <trace_id>" >&2
+        exit 1
+      fi
+      if [[ $# -gt 1 ]]; then
+        echo "Too many arguments for sports-agent hard-cancel command" >&2
+        echo "Use: ./trading-cli sports-agent hard-cancel <trace_id>" >&2
+        exit 1
+      fi
+      sports_agent_workflow_action "$workflow_id" "hardCancel" "manual hard cancel from trading-cli"
+      ;;
+    stop-service)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for sports-agent stop-service command" >&2
+        echo "Use: ./trading-cli sports-agent stop-service" >&2
+        exit 1
+      fi
+      sports_agent_stop_service_action
       ;;
     *)
       echo "Unknown sports-agent action: $action" >&2
-      echo "Use: ./trading-cli sports-agent [go|up|down|status|logs|approve] [--mode <hitl|auto_ultra_strict>] [--dry-run]" >&2
+      echo "Use: ./trading-cli sports-agent [go|up|down|status|logs|approve|execute|cancel|hard-cancel|stop-service] [--mode <hitl|auto_ultra_strict>] [--dry-run]" >&2
       exit 1
       ;;
   esac

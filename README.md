@@ -185,6 +185,7 @@ bash ./trading-cli test weather
 bash ./trading-cli test arbitrage
 bash ./trading-cli test llm-workflow
 bash ./trading-cli test sports-agent
+bash ./trading-cli test observability
 ```
 
 ## Bot Summaries

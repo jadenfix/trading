@@ -28,14 +28,18 @@
         </select>
       </label>
       <label>
-        Status
-        <select id="status-filter">
+        State
+        <select id="state-filter">
           <option value="">All</option>
         </select>
       </label>
       <label>
         Limit
         <input id="limit-input" type="number" min="10" max="1000" value="200" />
+      </label>
+      <label class="token-field">
+        Control Token
+        <input id="control-token-input" type="password" placeholder="OBS_CONTROL_TOKEN" autocomplete="off" />
       </label>
     </section>
 
@@ -59,12 +63,17 @@
       </aside>
 
       <section class="panel detail-panel">
-        <div class="panel-head">
+        <div class="panel-head panel-head-wrap">
           <h2 id="trace-title">Select a trace</h2>
           <div class="trace-actions">
-            <button id="approve-btn" type="button" hidden>Approve + Execute</button>
+            <button id="execute-btn" class="btn-accent" type="button" disabled>Execute</button>
+            <button id="cancel-btn" class="btn-soft" type="button" disabled>Cancel</button>
+            <button id="hard-cancel-btn" class="btn-danger" type="button" disabled>Hard Cancel</button>
+            <button id="stop-service-btn" class="btn-warn" type="button" disabled>Stop Service</button>
           </div>
         </div>
+
+        <p id="action-message" class="action-message muted">Control actions require a valid token.</p>
 
         <div id="trace-meta" class="trace-meta"></div>
 

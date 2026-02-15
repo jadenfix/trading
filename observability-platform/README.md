@@ -1,6 +1,6 @@
 # Observability Platform
 
-Unified observability and sports workflow runtime for this repository.
+Unified observability + workflow control stack for this repository.
 
 ## What This Adds
 
@@ -9,80 +9,80 @@ Unified observability and sports workflow runtime for this repository.
   - `arbitrage-bot`
   - `llm-rules-bot`
   - `sports-agent`
-- Temporal-compatible workflow broker with approval checkpoints.
-- Trace API + dashboard for cross-bot timeline inspection.
+- Google-style control API (`/v1/projects/*/locations/*/...`).
+- Execution-first dashboard with workflow timeline + actions.
 - Sports research worker with `hitl` and `auto_ultra_strict` modes.
 
 ## Architecture
 
 ```text
-                             +---------------------+
-                             |  Temporal UI :8233  |
-                             +----------+----------+
-                                        |
-                                        |
-+----------------+      +---------------v---------------+       +----------------------+
-| sports-agent   |<---->| temporal-broker :8787         |<----->| trading-cli approve  |
-| worker (Rust)  |      | /workflows /research /approve |       | command + operators  |
-+-------+--------+      +---------------+---------------+       +----------------------+
-        |                               |
-        | writes JSONL                  |
-        v                               v
-+-------+-------------------------------+------------------------+
-|                    TRADES/* JSONL + broker state              |
-+-------+-------------------------------+------------------------+
-        |
-        v
-+-------+-------------------------------+
-| trace-api :8791                       |
-| /api/traces + dashboard static assets |
-+-------+-------------------------------+
-        |
-        v
-+-------+-------------------------------+
-| Dashboard (browser)                   |
-| list traces, inspect events, approve  |
-+---------------------------------------+
+bots + sports-agent worker
+          |
+          v
+ TRADES/* JSONL + broker state
+          |
+          v
+ trace-api (:8791)
+  - /v1 workflow resources
+  - /v1 control actions
+  - dashboard static UI
+          |
+          v
+temporal-broker (:8787)
+  - workflow state machine
+  - operations + idempotency
+  - legacy compatibility routes
 ```
+
+Temporal UI still runs in parallel for workflow inspection.
 
 ## Quickstart
 
 From repo root:
 
 ```bash
-brew install temporal
-# 1) Start observability stack (Temporal + broker + trace API)
+# Optional hardening: set your own token
+export OBS_CONTROL_TOKEN="replace-me"
+
+# Start observability stack
 bash ./trading-cli observability up
 
-# 2) Run sports agent in HITL mode
+# Start sports agent in HITL mode
 bash ./trading-cli sports-agent up --mode hitl
 
-# 3) Open dashboard
+# Open dashboard
 bash ./trading-cli observability ui
-
-# 4) Approve a pending recommendation
-bash ./trading-cli sports-agent approve <trace_id>
 ```
 
-Stop everything:
+## CLI Control Examples
 
 ```bash
-bash ./trading-cli down
+# Execute a pending HITL workflow
+bash ./trading-cli sports-agent execute <workflow_id>
+
+# Soft cancel
+bash ./trading-cli sports-agent cancel <workflow_id>
+
+# Hard cancel
+bash ./trading-cli sports-agent cancel <workflow_id> --hard
+
+# Stop sports-agent managed process via control API
+bash ./trading-cli sports-agent stop-service
 ```
 
 ## Main URLs
 
-- Trace dashboard: `http://127.0.0.1:8791`
-- Trace API: `http://127.0.0.1:8791/api/traces`
+- Dashboard: `http://127.0.0.1:8791`
+- API root: `http://127.0.0.1:8791/v1/projects/local/locations/us-central1/workflows`
 - Temporal UI: `http://127.0.0.1:8233`
 - Broker health: `http://127.0.0.1:8787/health`
 
 ## Folder Map
 
-- `contracts/`: JSON schemas and API contract files.
-- `temporal-broker/`: workflow/approval broker.
-- `trace-api/`: unified trace ingestion + query server.
-- `dashboard/`: browser client served by trace-api.
-- `sports-agent-worker/`: Rust worker for sports analytics and order flow.
-- `docs/architecture.md`: detailed architecture and trace model.
-- `docs/operations.md`: operations and troubleshooting runbook.
+- `contracts/`: OpenAPI + schemas.
+- `temporal-broker/`: workflow state machine and operations backend.
+- `trace-api/`: trace query + control facade and dashboard host.
+- `dashboard/`: browser client.
+- `sports-agent-worker/`: Rust workflow runner.
+- `docs/architecture.md`: deeper architecture detail.
+- `docs/operations.md`: operational runbook.

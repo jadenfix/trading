@@ -139,6 +139,36 @@ button:focus-visible {
   box-shadow: 0 0 0 3px var(--focus);
 }
 
+button:disabled {
+  opacity: 0.52;
+  cursor: not-allowed;
+  transform: none;
+}
+
+button:disabled:hover {
+  border-color: var(--border-strong);
+}
+
+.btn-accent {
+  border-color: rgba(34, 197, 94, 0.52);
+  background: rgba(34, 197, 94, 0.16);
+}
+
+.btn-soft {
+  border-color: rgba(245, 158, 11, 0.5);
+  background: rgba(245, 158, 11, 0.14);
+}
+
+.btn-danger {
+  border-color: rgba(239, 68, 68, 0.52);
+  background: rgba(239, 68, 68, 0.17);
+}
+
+.btn-warn {
+  border-color: rgba(59, 130, 246, 0.52);
+  background: rgba(59, 130, 246, 0.16);
+}
+
 .controls {
   display: flex;
   flex-wrap: wrap;
@@ -152,6 +182,10 @@ button:focus-visible {
   gap: 0.22rem;
   font-size: 0.79rem;
   color: var(--muted);
+}
+
+.token-field {
+  min-width: 280px;
 }
 
 select,
@@ -193,6 +227,32 @@ input:focus {
 .panel-head h2 {
   font-size: 1.02rem;
   color: var(--text-strong);
+}
+
+.panel-head-wrap {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.trace-actions {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.trace-actions button {
+  min-width: 118px;
+}
+
+.action-message {
+  padding: 0.68rem 1rem 0.2rem;
+  font-size: 0.76rem;
+  letter-spacing: 0.01em;
+}
+
+.action-message.error {
+  color: var(--danger);
 }
 
 .executed-panel {
@@ -318,6 +378,36 @@ input:focus {
 .status-failed {
   color: var(--danger);
   background: var(--danger-soft);
+}
+
+.status-canceled_soft,
+.status-canceled_hard {
+  color: #fb7185;
+  background: rgba(251, 113, 133, 0.2);
+}
+
+.runtime-chip {
+  border-radius: 999px;
+  padding: 0.14rem 0.5rem;
+  font-size: 0.64rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.runtime-process_running {
+  color: #60a5fa;
+  background: rgba(59, 130, 246, 0.2);
+}
+
+.runtime-process_stopped {
+  color: var(--muted);
+  background: rgba(138, 143, 155, 0.2);
+}
+
+.runtime-unknown {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.18);
 }
 
 .detail-panel {
@@ -479,6 +569,15 @@ input:focus {
 
   .controls label:last-child {
     width: 100%;
+  }
+
+  .trace-actions {
+    gap: 0.38rem;
+  }
+
+  .trace-actions button {
+    min-width: 0;
+    flex: 1 1 calc(50% - 0.4rem);
   }
 
   select,

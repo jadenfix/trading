@@ -2,77 +2,65 @@
 
 ## Goals
 
-- Unified trace view across legacy Rust bots and new sports workflow.
-- Temporal-style workflow observability with explicit approval checkpoints.
-- Deterministic non-ML quant gate for sports recommendations.
+- Unified trace view across legacy Rust bots and the sports workflow.
+- Temporal-like observability with robust execute/cancel controls.
+- Google-style API contracts for control and monitoring.
 
 ## Components
 
 1. `sports-agent-worker` (Rust)
    - Research loop with SportsDataIO + The Odds API.
-   - Kalshi market scan and Bayesian gate calculation.
-   - Emits structured JSONL events and workflow metadata.
+   - Emits structured JSONL trace events.
+   - Polls broker workflow state for approval/cancel decisions.
 2. `temporal-broker` (Node)
-   - Registers workflows and statuses.
-   - Supports HITL approval API.
-   - Backward-compatible `/research/start` and `/research/{id}`.
+   - Workflow state machine and operation store.
+   - Supports `execute`, `cancel`, `hardCancel` transitions.
+   - Persists to `.trading-cli/observability/broker-state.json`.
 3. `trace-api` (Node)
-   - Reads all `TRADES/*` files.
-   - Merges broker workflow state.
-   - Produces normalized traces for UI/CLI.
-4. `dashboard` (Static)
-   - Cross-bot trace list and timeline explorer.
-   - Trigger approval for pending HITL traces.
+   - Reads `TRADES/*` and broker state.
+   - Exposes `/v1/projects/*/locations/*/...` resources.
+   - Hosts dashboard static assets.
+4. `dashboard` (static)
+   - Execution-first trace UX.
+   - Shows both lifecycle `state` and process `runtimeState`.
+   - Runs control actions with token auth.
 
-## Trace Envelope Model
+## Workflow State Model
 
-Each trace is represented by:
+Internal statuses:
 
-- `trace_id`
-- `workflow_id`
-- `source_bot`
-- `mode`
-- `ts_start`
-- `ts_end`
-- `status`
-- `requires_approval`
-- `approval`
-- `event_count`
+- `running`
+- `awaiting_approval`
+- `approved`
+- `executed`
+- `completed`
+- `failed`
+- `canceled_soft`
+- `canceled_hard`
 
-Each event is represented by:
+Control actions:
 
-- `trace_id`
-- `span_id`
-- `parent_span_id` (optional)
-- `kind`
-- `ts`
-- `severity`
-- `payload`
-- `source_file`
+- `:execute` only from `awaiting_approval`
+- `:cancel` from non-terminal states
+- `:hardCancel` from non-terminal states (or escalates over soft)
 
-## Sports Quant Flow
+## API Model
 
-1. Fetch The Odds API market prices.
-2. Fetch SportsDataIO game feed snapshots.
-3. Build team rating signal from completed games.
-4. Convert market data into implied probabilities.
-5. Blend odds + stats signal.
-6. Bayesian posterior update and credible interval.
-7. Compute net EV with fees/slippage.
-8. Apply mode gates:
-   - `hitl`: moderate gate + operator approval required
-   - `auto_ultra_strict`: strict posterior/EV/CLV/disagreement gate
+Resource patterns:
 
-## Approval Flow
+- `projects/{project}/locations/{location}/workflows/{workflow}`
+- `projects/{project}/locations/{location}/operations/{operation}`
+- `projects/{project}/locations/{location}/services/sports-agent`
 
-1. Worker emits recommendation and registers workflow (`awaiting_approval`).
-2. Operator approves via CLI or dashboard.
-3. Broker flips status to `approved`.
-4. Worker polls and executes order.
-5. Worker marks workflow `executed` or `failed`.
+Primary control methods:
+
+- `POST .../workflows/{workflow}:execute`
+- `POST .../workflows/{workflow}:cancel`
+- `POST .../workflows/{workflow}:hardCancel`
+- `POST .../services/sports-agent:stop`
 
 ## Data Paths
 
 - Trade events: `TRADES/<bot>/trades-YYYY-MM-DD.jsonl`
-- Broker workflow state: `.trading-cli/observability/broker-state.json`
-- Trace API reads both and builds unified timeline.
+- Broker state: `.trading-cli/observability/broker-state.json`
+- Control audit: `.trading-cli/observability/control-audit.jsonl`

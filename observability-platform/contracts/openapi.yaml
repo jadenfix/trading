@@ -1,89 +1,271 @@
 openapi: 3.1.0
 info:
   title: Trading Observability Platform API
-  version: 0.1.0
+  version: 0.2.0
 servers:
   - url: http://127.0.0.1:8791
 paths:
-  /api/traces:
+  /v1/projects/{project}/locations/{location}/workflows:
     get:
-      summary: List trace envelopes
+      summary: List workflow traces
       parameters:
+        - $ref: '#/components/parameters/project'
+        - $ref: '#/components/parameters/location'
         - in: query
-          name: bot
-          schema:
-            type: string
-        - in: query
-          name: status
-          schema:
-            type: string
-        - in: query
-          name: from
-          schema:
-            type: string
-            format: date-time
-        - in: query
-          name: to
-          schema:
-            type: string
-            format: date-time
-        - in: query
-          name: limit
+          name: pageSize
           schema:
             type: integer
-      responses:
-        "200":
-          description: Trace list
-  /api/traces/{trace_id}:
-    get:
-      summary: Get one trace with events
-      parameters:
-        - in: path
-          name: trace_id
-          required: true
+            minimum: 1
+            maximum: 1000
+        - in: query
+          name: pageToken
+          schema:
+            type: string
+        - in: query
+          name: filter
+          schema:
+            type: string
+        - in: query
+          name: orderBy
           schema:
             type: string
       responses:
-        "200":
-          description: Trace envelope + events
-        "404":
-          description: Not found
-  /api/traces/{trace_id}/events:
+        '200':
+          description: Workflow list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflows:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Workflow'
+                  nextPageToken:
+                    type: string
+  /v1/projects/{project}/locations/{location}/workflows/{workflow}:
     get:
-      summary: Get events for one trace
+      summary: Get one workflow
       parameters:
-        - in: path
-          name: trace_id
-          required: true
+        - $ref: '#/components/parameters/project'
+        - $ref: '#/components/parameters/location'
+        - $ref: '#/components/parameters/workflow'
+      responses:
+        '200':
+          description: Workflow resource
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workflow'
+        '404':
+          description: Not found
+  /v1/projects/{project}/locations/{location}/workflows/{workflow}/events:
+    get:
+      summary: List workflow events
+      parameters:
+        - $ref: '#/components/parameters/project'
+        - $ref: '#/components/parameters/location'
+        - $ref: '#/components/parameters/workflow'
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+        - in: query
+          name: pageToken
           schema:
             type: string
       responses:
-        "200":
-          description: Trace events
-        "404":
-          description: Not found
-  /api/traces/{trace_id}/approve:
+        '200':
+          description: Workflow events
+  '/v1/projects/{project}/locations/{location}/workflows/{workflow}:execute':
     post:
-      summary: Approve a HITL execution for this trace
+      summary: Execute a workflow (from AWAITING_APPROVAL)
       parameters:
+        - $ref: '#/components/parameters/project'
+        - $ref: '#/components/parameters/location'
+        - $ref: '#/components/parameters/workflow'
+      security:
+        - bearerAuth: []
+      requestBody:
+        $ref: '#/components/requestBodies/ControlRequest'
+      responses:
+        '200':
+          description: Long-running operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+        '401':
+          description: Unauthorized
+  '/v1/projects/{project}/locations/{location}/workflows/{workflow}:cancel':
+    post:
+      summary: Soft-cancel a workflow
+      parameters:
+        - $ref: '#/components/parameters/project'
+        - $ref: '#/components/parameters/location'
+        - $ref: '#/components/parameters/workflow'
+      security:
+        - bearerAuth: []
+      requestBody:
+        $ref: '#/components/requestBodies/ControlRequest'
+      responses:
+        '200':
+          description: Long-running operation
+  '/v1/projects/{project}/locations/{location}/workflows/{workflow}:hardCancel':
+    post:
+      summary: Hard-cancel a workflow
+      parameters:
+        - $ref: '#/components/parameters/project'
+        - $ref: '#/components/parameters/location'
+        - $ref: '#/components/parameters/workflow'
+      security:
+        - bearerAuth: []
+      requestBody:
+        $ref: '#/components/requestBodies/ControlRequest'
+      responses:
+        '200':
+          description: Long-running operation
+  '/v1/projects/{project}/locations/{location}/services/sports-agent:stop':
+    post:
+      summary: Stop the sports-agent managed process
+      parameters:
+        - $ref: '#/components/parameters/project'
+        - $ref: '#/components/parameters/location'
+      security:
+        - bearerAuth: []
+      requestBody:
+        $ref: '#/components/requestBodies/ControlRequest'
+      responses:
+        '200':
+          description: Long-running operation
+  /v1/projects/{project}/locations/{location}/executions:
+    get:
+      summary: List executed trades
+      parameters:
+        - $ref: '#/components/parameters/project'
+        - $ref: '#/components/parameters/location'
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+        - in: query
+          name: pageToken
+          schema:
+            type: string
+        - in: query
+          name: filter
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Executed trades feed
+  /v1/projects/{project}/locations/{location}/operations:
+    get:
+      summary: List control operations
+      parameters:
+        - $ref: '#/components/parameters/project'
+        - $ref: '#/components/parameters/location'
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+        - in: query
+          name: pageToken
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Operation list
+  /v1/projects/{project}/locations/{location}/operations/{operation}:
+    get:
+      summary: Get one operation
+      parameters:
+        - $ref: '#/components/parameters/project'
+        - $ref: '#/components/parameters/location'
         - in: path
-          name: trace_id
+          name: operation
           required: true
           schema:
             type: string
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                approved_by:
-                  type: string
-                command_context:
-                  type: string
       responses:
-        "200":
-          description: Approval accepted
-        "404":
-          description: Unknown workflow/trace
+        '200':
+          description: Operation state
+components:
+  parameters:
+    project:
+      in: path
+      name: project
+      required: true
+      schema:
+        type: string
+    location:
+      in: path
+      name: location
+      required: true
+      schema:
+        type: string
+    workflow:
+      in: path
+      name: workflow
+      required: true
+      schema:
+        type: string
+  requestBodies:
+    ControlRequest:
+      required: false
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              actor:
+                type: string
+              reason:
+                type: string
+              requestId:
+                type: string
+  schemas:
+    Workflow:
+      type: object
+      properties:
+        name:
+          type: string
+        workflowId:
+          type: string
+        traceId:
+          type: string
+        sourceBot:
+          type: string
+        state:
+          type: string
+        runtimeState:
+          type: string
+        availableActions:
+          type: array
+          items:
+            type: string
+        executedTradeCount:
+          type: integer
+        createTime:
+          type: string
+          format: date-time
+        updateTime:
+          type: string
+          format: date-time
+    Operation:
+      type: object
+      properties:
+        name:
+          type: string
+        done:
+          type: boolean
+        metadata:
+          type: object
+        response:
+          type: object
+        error:
+          type: object
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer

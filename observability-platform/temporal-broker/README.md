@@ -1,13 +1,13 @@
 # Temporal Broker
 
-HTTP broker for workflow status, approval checkpoints, and compatibility with existing `/research/*` calls.
+Stateful workflow broker for observability control-plane actions.
 
 ## Responsibilities
 
-- Register workflow runs and status transitions.
-- Expose workflow polling APIs (`/research/start`, `/research/{id}`).
-- Store and serve approval state for human-in-the-loop execution.
-- Persist workflow metadata to disk (`.trading-cli/observability/broker-state.json`).
+- Persist workflow status, approval, cancel state, and command metadata.
+- Serve Google-style workflow resources and long-running operations.
+- Keep legacy compatibility endpoints used by existing workers.
+- Write immutable control audit records.
 
 ## Run
 
@@ -17,7 +17,7 @@ From repo root:
 node observability-platform/temporal-broker/broker.mjs
 ```
 
-Or use the orchestrator:
+Or use orchestrator:
 
 ```bash
 bash ./trading-cli observability up
@@ -28,10 +28,23 @@ bash ./trading-cli observability up
 - `BROKER_HOST` (default `127.0.0.1`)
 - `BROKER_PORT` (default `8787`)
 - `BROKER_STATE_FILE` (default `<repo>/.trading-cli/observability/broker-state.json`)
+- `BROKER_AUDIT_FILE` (default `<repo>/.trading-cli/observability/control-audit.jsonl`)
+- `OBS_PROJECT` (default `local`)
+- `OBS_LOCATION` (default `us-central1`)
 
-## Endpoints
+## V1 Endpoints
 
 - `GET /health`
+- `GET /v1/projects/{project}/locations/{location}/workflows`
+- `GET /v1/projects/{project}/locations/{location}/workflows/{workflow}`
+- `POST /v1/projects/{project}/locations/{location}/workflows/{workflow}:execute`
+- `POST /v1/projects/{project}/locations/{location}/workflows/{workflow}:cancel`
+- `POST /v1/projects/{project}/locations/{location}/workflows/{workflow}:hardCancel`
+- `GET /v1/projects/{project}/locations/{location}/operations`
+- `GET /v1/projects/{project}/locations/{location}/operations/{operation}`
+
+## Legacy Compatibility Endpoints
+
 - `POST /research/start`
 - `GET /research/{workflow_id}`
 - `POST /workflows/register`
@@ -41,21 +54,8 @@ bash ./trading-cli observability up
 - `POST /execution/{workflow_id}/approve`
 - `GET /execution/{workflow_id}/approval`
 
-## Example
+## Notes
 
-```bash
-curl -sS -X POST http://127.0.0.1:8787/workflows/register \
-  -H 'content-type: application/json' \
-  -d '{
-    "workflow_id": "sports-research-123",
-    "trace_id": "sports-research-123",
-    "mode": "hitl",
-    "source_bot": "sports-agent",
-    "requires_approval": true,
-    "status": "awaiting_approval"
-  }'
-
-curl -sS -X POST http://127.0.0.1:8787/execution/sports-research-123/approve \
-  -H 'content-type: application/json' \
-  -d '{"approved_by": "operator", "command_context": "trading-cli"}'
-```
+- `execute` is valid only from `awaiting_approval`.
+- `cancel` and `hardCancel` produce terminal `canceled_soft` / `canceled_hard` states.
+- Repeated requests with the same `requestId` are idempotent (same operation returned).

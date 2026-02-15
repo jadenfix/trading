@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 import { createServer } from "node:http";
-import { readFile, readdir } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readLimitedJsonBody } from "../shared/http-json.mjs";
+import { pruneLocalOperationCaches as pruneLocalOperationCachesInPlace } from "./local-ops-cache.mjs";
+import { buildApiConfigResponse } from "./config-response.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,6 +22,22 @@ const brokerStateFile = process.env.BROKER_STATE_FILE
   ? path.resolve(process.env.BROKER_STATE_FILE)
   : path.join(repoRoot, ".trading-cli", "observability", "broker-state.json");
 const temporalUiUrl = process.env.TEMPORAL_UI_URL ?? "http://127.0.0.1:8233";
+const defaultProject = process.env.OBS_PROJECT ?? "local";
+const defaultLocation = process.env.OBS_LOCATION ?? "us-central1";
+const controlToken = process.env.OBS_CONTROL_TOKEN ?? "local-dev-token";
+const controlAuditFile = process.env.OBS_CONTROL_AUDIT_FILE
+  ? path.resolve(process.env.OBS_CONTROL_AUDIT_FILE)
+  : path.join(repoRoot, ".trading-cli", "observability", "control-audit.jsonl");
+const devStateDir = path.join(repoRoot, ".trading-cli", "dev");
+const maxBodyBytes = Math.max(1024, Number.parseInt(process.env.TRACE_API_MAX_BODY_BYTES ?? "1048576", 10) || 1048576);
+const localOpsMaxEntries = Math.max(
+  100,
+  Number.parseInt(process.env.TRACE_API_LOCAL_OPS_MAX_ENTRIES ?? "5000", 10) || 5000,
+);
+const localOpsTtlMs = Math.max(
+  60_000,
+  Number.parseInt(process.env.TRACE_API_LOCAL_OPS_TTL_MS ?? String(24 * 60 * 60 * 1000), 10) || 24 * 60 * 60 * 1000,
+);
 
 const TRACE_START_KINDS = new Set([
   "strategy_cycle_start",
@@ -33,7 +52,20 @@ const TRACE_END_KINDS = new Set([
   "order_placed",
   "workflow_complete",
   "approval_timeout",
+  "workflow_canceled_soft",
+  "workflow_canceled_hard",
 ]);
+
+const TERMINAL_STATUSES = new Set(["executed", "completed", "failed", "canceled_soft", "canceled_hard"]);
+const BOT_SERVICE_MAP = {
+  "sports-agent": "sports-agent",
+  "weather-bot": "weather",
+  "arbitrage-bot": "arbitrage",
+  "llm-rules-bot": "llm-workflow",
+};
+
+const localOperations = new Map();
+const localRequestIndex = new Map();
 
 function nowIso() {
   return new Date().toISOString();
@@ -55,10 +87,67 @@ function normalizeStatus(value) {
   if (["failed", "error", "internal_error"].includes(status)) {
     return "failed";
   }
-  if (["awaiting_approval", "approved", "completed", "executed", "running"].includes(status)) {
+  if (["cancelled_soft", "canceledsoft", "cancel_soft", "cancelled-soft"].includes(status)) {
+    return "canceled_soft";
+  }
+  if (["cancelled_hard", "canceledhard", "cancel_hard", "cancelled-hard"].includes(status)) {
+    return "canceled_hard";
+  }
+  if (
+    [
+      "awaiting_approval",
+      "approved",
+      "completed",
+      "executed",
+      "running",
+      "failed",
+      "canceled_soft",
+      "canceled_hard",
+    ].includes(status)
+  ) {
     return status;
   }
   return status;
+}
+
+function toWorkflowState(status) {
+  const normalized = normalizeStatus(status);
+  const table = {
+    running: "RUNNING",
+    awaiting_approval: "AWAITING_APPROVAL",
+    approved: "APPROVED",
+    executed: "EXECUTED",
+    completed: "COMPLETED",
+    failed: "FAILED",
+    canceled_soft: "CANCELED_SOFT",
+    canceled_hard: "CANCELED_HARD",
+  };
+  return table[normalized] ?? "STATE_UNSPECIFIED";
+}
+
+function isTerminalStatus(status) {
+  return TERMINAL_STATUSES.has(normalizeStatus(status));
+}
+
+function deriveAvailableActions(status, workflowId, cancelState = "none", controlLocked = false) {
+  if (!workflowId || controlLocked) {
+    return [];
+  }
+  const normalizedCancelState = String(cancelState ?? "none").trim().toLowerCase();
+  if (normalizedCancelState === "hard_requested") {
+    return [];
+  }
+  if (normalizedCancelState === "soft_requested") {
+    return ["hardCancel"];
+  }
+  const normalized = normalizeStatus(status);
+  if (normalized === "awaiting_approval") {
+    return ["execute", "cancel", "hardCancel"];
+  }
+  if (normalized === "running" || normalized === "approved") {
+    return ["cancel", "hardCancel"];
+  }
+  return [];
 }
 
 function parseTs(raw) {
@@ -76,13 +165,22 @@ function inferEventStatus(kind, event) {
   const normalizedKind = String(kind ?? "").toLowerCase();
   const textBlob = JSON.stringify(event).toLowerCase();
 
+  if (normalizedKind.includes("cancel_requested_hard") || normalizedKind.includes("canceled_hard")) {
+    return "canceled_hard";
+  }
+  if (normalizedKind.includes("cancel_requested_soft")) {
+    return "running";
+  }
+  if (normalizedKind.includes("canceled_soft")) {
+    return "canceled_soft";
+  }
   if (normalizedKind.includes("error") || normalizedKind.includes("failed")) {
     return "failed";
   }
   if (normalizedKind.includes("awaiting_approval")) {
     return "awaiting_approval";
   }
-  if (normalizedKind === "execution_approved") {
+  if (normalizedKind === "execution_approved" || normalizedKind === "execute_requested") {
     return "approved";
   }
   if (normalizedKind === "order_placed") {
@@ -180,12 +278,14 @@ function extractExecutionRecord(kind, payload, metadata = {}) {
 
 function combineStatuses(current, next) {
   const priority = {
-    failed: 6,
-    awaiting_approval: 5,
+    failed: 9,
+    canceled_hard: 8,
+    canceled_soft: 7,
+    executed: 6,
+    completed: 5,
     approved: 4,
-    executed: 3,
-    completed: 2,
-    running: 1,
+    awaiting_approval: 3,
+    running: 2,
   };
   const currentScore = priority[current] ?? 0;
   const nextScore = priority[next] ?? 0;
@@ -251,9 +351,6 @@ async function loadTradeEvents() {
       }
       const parsed = safeJsonParse(line);
       if (!parsed || typeof parsed !== "object") {
-        console.warn(
-          `[trace-api] Skipping malformed JSONL in ${file.path} at line ${lineIndex + 1}`
-        );
         continue;
       }
 
@@ -345,12 +442,19 @@ function buildTraceModel(events, workflows) {
         ts_start: entry.ts_iso || null,
         ts_end: entry.ts_iso || null,
         status: eventStatus,
+        state: toWorkflowState(eventStatus),
+        runtime_state: "UNKNOWN",
         requires_approval: false,
         approval: null,
+        cancel_state: "none",
+        control_locked: false,
+        available_actions: [],
         event_count: 0,
         executed_trade_count: 0,
         latest_execution: null,
         latest_execution_ts: null,
+        last_command_at: null,
+        last_command_by: null,
         executed_trades: [],
         events: [],
       });
@@ -399,6 +503,7 @@ function buildTraceModel(events, workflows) {
     if (!traceId) {
       continue;
     }
+
     if (!traces.has(traceId)) {
       traces.set(traceId, {
         trace_id: traceId,
@@ -408,12 +513,19 @@ function buildTraceModel(events, workflows) {
         ts_start: workflow.created_at ? String(workflow.created_at) : null,
         ts_end: workflow.updated_at ? String(workflow.updated_at) : null,
         status: normalizeStatus(workflow.status),
+        state: toWorkflowState(normalizeStatus(workflow.status)),
+        runtime_state: "UNKNOWN",
         requires_approval: Boolean(workflow.requires_approval),
         approval: workflow.approval ?? null,
+        cancel_state: String(workflow.cancel_state ?? "none"),
+        control_locked: Boolean(workflow.control_locked),
+        available_actions: [],
         event_count: 0,
         executed_trade_count: 0,
         latest_execution: null,
         latest_execution_ts: null,
+        last_command_at: workflow.last_command_at ?? null,
+        last_command_by: workflow.last_command_by ?? null,
         executed_trades: [],
         events: [],
       });
@@ -425,25 +537,32 @@ function buildTraceModel(events, workflows) {
     trace.status = combineStatuses(trace.status, normalizeStatus(workflow.status));
     trace.requires_approval = Boolean(workflow.requires_approval);
     trace.approval = workflow.approval ?? trace.approval;
+    trace.cancel_state = String(workflow.cancel_state ?? trace.cancel_state ?? "none");
+    trace.control_locked = Boolean(workflow.control_locked ?? trace.control_locked);
+    trace.last_command_at = workflow.last_command_at ?? trace.last_command_at;
+    trace.last_command_by = workflow.last_command_by ?? trace.last_command_by;
     trace.ts_start = trace.ts_start ?? (workflow.created_at ? String(workflow.created_at) : null);
     trace.ts_end = trace.ts_end ?? (workflow.updated_at ? String(workflow.updated_at) : null);
 
     const brokerEvents = Array.isArray(workflow.events) ? workflow.events : [];
     for (let idx = 0; idx < brokerEvents.length; idx += 1) {
       const brokerEvent = brokerEvents[idx];
+      const kind = String(brokerEvent.kind ?? "broker_event");
+      const eventStatus = inferEventStatus(kind, brokerEvent);
+      trace.status = combineStatuses(trace.status, eventStatus);
       trace.events.push({
         trace_id: traceId,
         span_id: `broker:${workflow.workflow_id}:${idx}`,
         parent_span_id: null,
-        kind: String(brokerEvent.kind ?? "broker_event"),
+        kind,
         ts: String(brokerEvent.ts ?? workflow.updated_at ?? nowIso()),
-        severity: "info",
+        severity: eventStatus === "failed" ? "error" : "info",
         payload: brokerEvent,
         source_file: brokerStateFile,
       });
       trace.event_count += 1;
 
-      const execution = extractExecutionRecord(String(brokerEvent.kind ?? "broker_event"), brokerEvent, {
+      const execution = extractExecutionRecord(kind, brokerEvent, {
         trace_id: traceId,
         workflow_id: trace.workflow_id,
         source_bot: trace.source_bot,
@@ -459,12 +578,20 @@ function buildTraceModel(events, workflows) {
     }
   }
 
+  for (const trace of traces.values()) {
+    trace.status = normalizeStatus(trace.status);
+    trace.state = toWorkflowState(trace.status);
+    trace.available_actions = deriveAvailableActions(trace.status, trace.workflow_id, trace.cancel_state, trace.control_locked);
+  }
+
   const statusPriority = {
-    executed: 6,
-    awaiting_approval: 5,
-    approved: 4,
-    running: 3,
-    completed: 2,
+    executed: 8,
+    awaiting_approval: 7,
+    approved: 6,
+    running: 5,
+    completed: 4,
+    canceled_soft: 3,
+    canceled_hard: 2,
     failed: 1,
   };
 
@@ -473,18 +600,224 @@ function buildTraceModel(events, workflows) {
     if (execDelta !== 0) {
       return execDelta;
     }
+
     const statusDelta = (statusPriority[b.status] ?? 0) - (statusPriority[a.status] ?? 0);
     if (statusDelta !== 0) {
       return statusDelta;
     }
+
     const execTsDelta = safeEpoch(b.latest_execution_ts) - safeEpoch(a.latest_execution_ts);
     if (execTsDelta !== 0) {
       return execTsDelta;
     }
+
     return safeEpoch(b.ts_start) - safeEpoch(a.ts_start);
   });
 
   return { traces, traceList };
+}
+
+function isPidRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runtimeForService(service) {
+  if (!service) {
+    return "UNKNOWN";
+  }
+
+  const pidfile = path.join(devStateDir, `${service}.pid`);
+  let raw;
+  try {
+    raw = await readFile(pidfile, "utf8");
+  } catch {
+    return "PROCESS_STOPPED";
+  }
+
+  const pid = Number.parseInt(String(raw).trim(), 10);
+  if (!Number.isInteger(pid) || pid <= 1) {
+    return "PROCESS_STOPPED";
+  }
+
+  return isPidRunning(pid) ? "PROCESS_RUNNING" : "PROCESS_STOPPED";
+}
+
+async function annotateRuntimeState(traceList) {
+  const cache = new Map();
+
+  for (const trace of traceList) {
+    const service = BOT_SERVICE_MAP[String(trace.source_bot ?? "")];
+    if (!service) {
+      trace.runtime_state = "UNKNOWN";
+      continue;
+    }
+
+    if (!cache.has(service)) {
+      cache.set(service, await runtimeForService(service));
+    }
+    trace.runtime_state = cache.get(service);
+  }
+}
+
+function workflowResourceName(project, location, workflowId) {
+  return `projects/${project}/locations/${location}/workflows/${workflowId}`;
+}
+
+function operationResourceName(project, location, operationId) {
+  return `projects/${project}/locations/${location}/operations/${operationId}`;
+}
+
+function buildWorkflowResource(trace, project, location) {
+  const workflowId = String(trace.workflow_id ?? trace.trace_id);
+  const status = normalizeStatus(trace.status);
+
+  return {
+    name: workflowResourceName(project, location, workflowId),
+    uid: trace.trace_id,
+    workflowId,
+    traceId: trace.trace_id,
+    sourceBot: trace.source_bot ?? "unknown",
+    mode: trace.mode ?? null,
+    state: toWorkflowState(status),
+    status,
+    runtimeState: trace.runtime_state ?? "UNKNOWN",
+    requiresApproval: Boolean(trace.requires_approval),
+    approval: trace.approval ?? null,
+    cancelState: trace.cancel_state ?? "none",
+    controlLocked: Boolean(trace.control_locked),
+    availableActions: deriveAvailableActions(status, trace.workflow_id, trace.cancel_state, trace.control_locked),
+    createTime: trace.ts_start ?? null,
+    updateTime: trace.ts_end ?? null,
+    eventCount: trace.event_count ?? 0,
+    executedTradeCount: trace.executed_trade_count ?? 0,
+    latestExecutionTime: trace.latest_execution_ts ?? null,
+    latestExecution: trace.latest_execution ?? null,
+    lastCommandAt: trace.last_command_at ?? null,
+    lastCommandBy: trace.last_command_by ?? null,
+  };
+}
+
+function parseFilter(raw) {
+  const out = {};
+  if (!raw) {
+    return out;
+  }
+
+  const segments = String(raw)
+    .split(/\s+and\s+/i)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+
+  for (const segment of segments) {
+    const match = segment.match(/^([a-zA-Z0-9_.]+)\s*=\s*"?([^"\s]+)"?$/);
+    if (!match) {
+      continue;
+    }
+    out[match[1].toLowerCase()] = match[2];
+  }
+
+  return out;
+}
+
+function applyWorkflowResourceFilters(resources, query) {
+  const parsedFilter = parseFilter(query.get("filter"));
+  const botFilter = query.get("bot") ?? query.get("source_bot") ?? parsedFilter.source_bot;
+  const stateFilter = query.get("status") ?? query.get("state") ?? parsedFilter.state;
+  const modeFilter = query.get("mode") ?? parsedFilter.mode;
+  const runtimeFilter = query.get("runtime_state") ?? parsedFilter.runtime_state;
+
+  return resources.filter((resource) => {
+    if (botFilter && String(resource.sourceBot) !== String(botFilter)) {
+      return false;
+    }
+
+    if (stateFilter) {
+      const wanted = String(stateFilter).toUpperCase();
+      if (resource.state.toUpperCase() !== wanted && resource.status.toUpperCase() !== wanted) {
+        return false;
+      }
+    }
+
+    if (modeFilter && String(resource.mode ?? "") !== String(modeFilter)) {
+      return false;
+    }
+
+    if (runtimeFilter && String(resource.runtimeState).toUpperCase() !== String(runtimeFilter).toUpperCase()) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
+function orderWorkflowResources(resources, orderByRaw) {
+  const orderBy = String(orderByRaw ?? "executedTradeCount desc,updateTime desc").trim();
+  const clauses = orderBy
+    .split(",")
+    .map((raw) => raw.trim())
+    .filter(Boolean)
+    .map((clause) => {
+      const [fieldRaw, dirRaw] = clause.split(/\s+/);
+      return {
+        field: fieldRaw || "updateTime",
+        descending: String(dirRaw ?? "desc").toLowerCase() !== "asc",
+      };
+    });
+
+  return [...resources].sort((left, right) => {
+    for (const clause of clauses) {
+      let leftValue;
+      let rightValue;
+
+      if (clause.field === "createTime") {
+        leftValue = safeEpoch(left.createTime);
+        rightValue = safeEpoch(right.createTime);
+      } else if (clause.field === "updateTime") {
+        leftValue = safeEpoch(left.updateTime);
+        rightValue = safeEpoch(right.updateTime);
+      } else if (clause.field === "state") {
+        leftValue = left.state;
+        rightValue = right.state;
+      } else if (clause.field === "runtimeState") {
+        leftValue = left.runtimeState;
+        rightValue = right.runtimeState;
+      } else {
+        leftValue = Number(left.executedTradeCount ?? 0);
+        rightValue = Number(right.executedTradeCount ?? 0);
+      }
+
+      if (leftValue === rightValue) {
+        continue;
+      }
+
+      if (clause.descending) {
+        return leftValue < rightValue ? 1 : -1;
+      }
+      return leftValue < rightValue ? -1 : 1;
+    }
+
+    return 0;
+  });
+}
+
+function paginate(items, query, defaultPageSize = 200) {
+  const pageSizeRaw = query.get("pageSize") ?? query.get("limit");
+  const pageSize = Math.max(1, Math.min(1000, Number.parseInt(pageSizeRaw ?? String(defaultPageSize), 10) || defaultPageSize));
+  const tokenRaw = query.get("pageToken") ?? "0";
+  const offset = Math.max(0, Number.parseInt(tokenRaw, 10) || 0);
+
+  const slice = items.slice(offset, offset + pageSize);
+  const nextPageToken = offset + pageSize < items.length ? String(offset + pageSize) : "";
+
+  return {
+    items: slice,
+    nextPageToken,
+  };
 }
 
 function applyTraceFilters(traceList, query) {
@@ -522,7 +855,8 @@ function applyTraceFilters(traceList, query) {
   }
 
   if (status) {
-    results = results.filter((trace) => trace.status === status);
+    const normalized = normalizeStatus(status);
+    results = results.filter((trace) => normalizeStatus(trace.status) === normalized);
   }
 
   if (Number.isInteger(limit) && limit > 0) {
@@ -532,14 +866,30 @@ function applyTraceFilters(traceList, query) {
   return results;
 }
 
-function sendJson(res, statusCode, payload) {
+function googleError(code, status, message, details = []) {
+  return {
+    error: {
+      code,
+      status,
+      message,
+      details,
+    },
+  };
+}
+
+function sendJson(res, statusCode, payload, extraHeaders = {}) {
   const body = JSON.stringify(payload, null, 2);
   res.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     "content-length": Buffer.byteLength(body),
+    ...extraHeaders,
   });
   res.end(body);
+}
+
+function sendGoogleError(res, statusCode, status, message, details = []) {
+  return sendJson(res, statusCode, googleError(statusCode, status, message, details));
 }
 
 function sendText(res, statusCode, body, contentType = "text/plain; charset=utf-8") {
@@ -552,21 +902,220 @@ function sendText(res, statusCode, body, contentType = "text/plain; charset=utf-
 }
 
 async function readBodyJson(req) {
-  const chunks = [];
-  let totalLength = 0;
-  for await (const chunk of req) {
-    totalLength += chunk.length;
-    if (totalLength > 1024 * 1024) {
-      // 1MB limit
-      throw new Error("Request body too large");
+  return readLimitedJsonBody(req, maxBodyBytes);
+}
+
+async function ensureAuditDir() {
+  await mkdir(path.dirname(controlAuditFile), { recursive: true });
+}
+
+let auditInFlight = Promise.resolve();
+function appendControlAudit(entry) {
+  auditInFlight = auditInFlight
+    .catch(() => undefined)
+    .then(async () => {
+      await ensureAuditDir();
+      await appendFile(controlAuditFile, `${JSON.stringify({ ts: nowIso(), ...entry })}\n`, "utf8");
+    });
+  return auditInFlight;
+}
+
+function parseBearerToken(req) {
+  const authHeader = String(req.headers.authorization ?? "").trim();
+  if (authHeader.toLowerCase().startsWith("bearer ")) {
+    return authHeader.slice(7).trim();
+  }
+  return null;
+}
+
+function requireControlAuth(req, res, actorHint = "operator") {
+  const bearer = parseBearerToken(req);
+  const headerToken = String(req.headers["x-observability-control-token"] ?? "").trim();
+  const supplied = bearer || headerToken;
+
+  if (!supplied || supplied !== controlToken) {
+    sendGoogleError(res, 401, "UNAUTHENTICATED", "Missing or invalid control token");
+    return null;
+  }
+
+  const actorHeader = String(req.headers["x-observability-actor"] ?? "").trim();
+  const actor = actorHeader || String(actorHint || "operator");
+  return actor;
+}
+
+async function fetchBroker(pathname, init = {}) {
+  try {
+    const response = await fetch(`${brokerBaseUrl}${pathname}`, init);
+    const payload = await response.json().catch(() => ({
+      error: {
+        code: 502,
+        status: "INTERNAL",
+        message: "Invalid broker response",
+      },
+    }));
+    return {
+      status: response.status,
+      payload,
+    };
+  } catch (error) {
+    return {
+      status: 502,
+      payload: googleError(
+        502,
+        "UNAVAILABLE",
+        `Broker request failed: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    };
+  }
+}
+
+function createLocalOperation(project, location, action, target, actor, reason, requestId) {
+  pruneLocalOperationCaches();
+  const operationId = `local-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const name = operationResourceName(project, location, operationId);
+  const now = nowIso();
+  const operation = {
+    name,
+    done: false,
+    metadata: {
+      action,
+      target,
+      actor,
+      reason: reason || null,
+      requestId: requestId || null,
+      createTime: now,
+      updateTime: now,
+    },
+  };
+  localOperations.set(name, operation);
+  return operation;
+}
+
+function completeLocalOperation(operation, responsePayload, errorPayload) {
+  operation.done = true;
+  operation.metadata.updateTime = nowIso();
+  if (errorPayload) {
+    operation.error = errorPayload;
+    delete operation.response;
+  } else {
+    operation.response = responsePayload;
+    delete operation.error;
+  }
+}
+
+function listLocalOperations(project, location) {
+  pruneLocalOperationCaches();
+  const prefix = `projects/${project}/locations/${location}/operations/`;
+  return [...localOperations.values()]
+    .filter((operation) => operation.name.startsWith(prefix))
+    .sort((left, right) => safeEpoch(right.metadata?.createTime) - safeEpoch(left.metadata?.createTime));
+}
+
+function pruneLocalOperationCaches() {
+  pruneLocalOperationCachesInPlace(localOperations, localRequestIndex, {
+    maxEntries: localOpsMaxEntries,
+    ttlMs: localOpsTtlMs,
+  });
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function stopManagedService(serviceName) {
+  const pidfile = path.join(devStateDir, `${serviceName}.pid`);
+
+  let raw;
+  try {
+    raw = await readFile(pidfile, "utf8");
+  } catch {
+    return {
+      service: serviceName,
+      runtimeState: "PROCESS_STOPPED",
+      alreadyStopped: true,
+    };
+  }
+
+  const pid = Number.parseInt(String(raw).trim(), 10);
+  if (!Number.isInteger(pid) || pid <= 1) {
+    await unlink(pidfile).catch(() => undefined);
+    return {
+      service: serviceName,
+      runtimeState: "PROCESS_STOPPED",
+      alreadyStopped: true,
+    };
+  }
+
+  if (!isPidRunning(pid)) {
+    await unlink(pidfile).catch(() => undefined);
+    return {
+      service: serviceName,
+      runtimeState: "PROCESS_STOPPED",
+      alreadyStopped: true,
+      pid,
+    };
+  }
+
+  process.kill(pid, "SIGTERM");
+  const deadline = Date.now() + 3000;
+  let forced = false;
+
+  while (Date.now() < deadline) {
+    if (!isPidRunning(pid)) {
+      break;
     }
-    chunks.push(chunk);
+    await sleepMs(120);
   }
-  const raw = Buffer.concat(chunks).toString("utf8").trim();
-  if (!raw) {
-    return {};
+
+  if (isPidRunning(pid)) {
+    process.kill(pid, "SIGKILL");
+    forced = true;
+    await sleepMs(120);
   }
-  return JSON.parse(raw);
+
+  if (isPidRunning(pid)) {
+    throw new Error(`Failed to stop service ${serviceName}; pid ${pid} is still running`);
+  }
+
+  await unlink(pidfile).catch(() => undefined);
+
+  return {
+    service: serviceName,
+    runtimeState: "PROCESS_STOPPED",
+    pid,
+    forced,
+    alreadyStopped: false,
+  };
+}
+
+function executionResourceName(project, location, executionId) {
+  return `projects/${project}/locations/${location}/executions/${encodeURIComponent(executionId)}`;
+}
+
+function buildExecutionResources(traceList, project, location) {
+  return traceList
+    .flatMap((trace) => (Array.isArray(trace.executed_trades) ? trace.executed_trades : []))
+    .map((execution) => ({
+      name: executionResourceName(project, location, execution.execution_id),
+      executionId: execution.execution_id,
+      traceId: execution.trace_id,
+      workflowId: execution.workflow_id,
+      sourceBot: execution.source_bot,
+      kind: execution.kind,
+      status: execution.status,
+      summary: execution.summary,
+      ticker: execution.ticker,
+      eventTicker: execution.event_ticker,
+      side: execution.side,
+      action: execution.action,
+      priceCents: execution.price_cents,
+      count: execution.count,
+      feeCentsEstimate: execution.fee_cents_est,
+      executeTime: execution.ts,
+    }))
+    .sort((a, b) => safeEpoch(b.executeTime) - safeEpoch(a.executeTime));
 }
 
 async function serveStatic(pathname, res) {
@@ -620,14 +1169,189 @@ async function handleRequest(req, res) {
         ts: nowIso(),
         trades_root: tradesRoot,
         broker_state_file: brokerStateFile,
+        control_token_configured: Boolean(controlToken),
       });
     }
 
     if (req.method === "GET" && pathname === "/api/config") {
+      return sendJson(
+        res,
+        200,
+        buildApiConfigResponse({
+          brokerBaseUrl,
+          temporalUiUrl,
+          traceApiUrl: `http://${host}:${port}`,
+          defaultProject,
+          defaultLocation,
+        }),
+      );
+    }
+
+    const workflowActionMatch = pathname.match(
+      /^\/v1\/projects\/([^/]+)\/locations\/([^/]+)\/workflows\/([^/:]+):(execute|cancel|hardCancel)$/,
+    );
+    if (req.method === "POST" && workflowActionMatch) {
+      let body;
+      try {
+        body = await readBodyJson(req);
+      } catch (error) {
+        if (error && typeof error === "object" && Number.isInteger(error.statusCode)) {
+          return sendGoogleError(
+            res,
+            error.statusCode,
+            error.googleStatus ?? "INVALID_ARGUMENT",
+            error.message ?? "Invalid JSON payload",
+          );
+        }
+        return sendGoogleError(res, 400, "INVALID_ARGUMENT", "Invalid JSON payload");
+      }
+
+      const actor = requireControlAuth(req, res, body.actor ?? "operator");
+      if (!actor) {
+        return;
+      }
+
+      const project = decodeURIComponent(workflowActionMatch[1]);
+      const location = decodeURIComponent(workflowActionMatch[2]);
+      const workflowId = decodeURIComponent(workflowActionMatch[3]);
+      const action = workflowActionMatch[4];
+      const requestId = String(body.requestId ?? body.request_id ?? `${Date.now()}-${Math.random()}`);
+      const reason = String(body.reason ?? "").trim();
+
+      const brokerPath = `/v1/projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/workflows/${encodeURIComponent(workflowId)}:${action}`;
+      const { status, payload } = await fetchBroker(brokerPath, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-observability-actor": actor,
+        },
+        body: JSON.stringify({
+          requestId,
+          actor,
+          reason,
+        }),
+      });
+
+      await appendControlAudit({
+        actor,
+        action,
+        target: workflowResourceName(project, location, workflowId),
+        request_id: requestId,
+        reason: reason || null,
+        upstream_status: status,
+      });
+
+      return sendJson(res, status, payload);
+    }
+
+    const serviceStopMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/locations\/([^/]+)\/services\/([^/:]+):stop$/);
+    if (req.method === "POST" && serviceStopMatch) {
+      let body;
+      try {
+        body = await readBodyJson(req);
+      } catch (error) {
+        if (error && typeof error === "object" && Number.isInteger(error.statusCode)) {
+          return sendGoogleError(
+            res,
+            error.statusCode,
+            error.googleStatus ?? "INVALID_ARGUMENT",
+            error.message ?? "Invalid JSON payload",
+          );
+        }
+        return sendGoogleError(res, 400, "INVALID_ARGUMENT", "Invalid JSON payload");
+      }
+
+      const actor = requireControlAuth(req, res, body.actor ?? "operator");
+      if (!actor) {
+        return;
+      }
+
+      const project = decodeURIComponent(serviceStopMatch[1]);
+      const location = decodeURIComponent(serviceStopMatch[2]);
+      const serviceName = decodeURIComponent(serviceStopMatch[3]);
+      const requestId = String(body.requestId ?? body.request_id ?? `${Date.now()}-${Math.random()}`);
+      const reason = String(body.reason ?? "").trim();
+
+      if (serviceName !== "sports-agent") {
+        return sendGoogleError(res, 400, "INVALID_ARGUMENT", "Only services/sports-agent:stop is supported in v1");
+      }
+
+      const requestKey = `${project}|${location}|service-stop|${serviceName}|${requestId}`;
+      const existingName = localRequestIndex.get(requestKey);
+      if (existingName && localOperations.has(existingName)) {
+        return sendJson(res, 200, localOperations.get(existingName));
+      }
+
+      const target = `projects/${project}/locations/${location}/services/${serviceName}`;
+      const operation = createLocalOperation(project, location, "stopService", target, actor, reason, requestId);
+
+      try {
+        const result = await stopManagedService(serviceName);
+        completeLocalOperation(operation, {
+          serviceName,
+          runtimeState: result.runtimeState,
+          alreadyStopped: Boolean(result.alreadyStopped),
+          forced: Boolean(result.forced),
+          pid: result.pid ?? null,
+        });
+      } catch (error) {
+        completeLocalOperation(operation, null, {
+          code: 13,
+          status: "INTERNAL",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      localRequestIndex.set(requestKey, operation.name);
+
+      await appendControlAudit({
+        actor,
+        action: "stopService",
+        target,
+        request_id: requestId,
+        reason: reason || null,
+        status: operation.error ? "INTERNAL" : "OK",
+      });
+
+      return sendJson(res, 200, operation);
+    }
+
+    const operationGetMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/locations\/([^/]+)\/operations\/([^/]+)$/);
+    if (req.method === "GET" && operationGetMatch) {
+      const project = decodeURIComponent(operationGetMatch[1]);
+      const location = decodeURIComponent(operationGetMatch[2]);
+      const operationId = decodeURIComponent(operationGetMatch[3]);
+      const operationName = operationResourceName(project, location, operationId);
+      pruneLocalOperationCaches();
+
+      if (localOperations.has(operationName)) {
+        return sendJson(res, 200, localOperations.get(operationName));
+      }
+
+      const brokerPath = `/v1/projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/operations/${encodeURIComponent(operationId)}`;
+      const { status, payload } = await fetchBroker(brokerPath, {
+        method: "GET",
+      });
+      return sendJson(res, status, payload);
+    }
+
+    const operationListMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/locations\/([^/]+)\/operations$/);
+    if (req.method === "GET" && operationListMatch) {
+      const project = decodeURIComponent(operationListMatch[1]);
+      const location = decodeURIComponent(operationListMatch[2]);
+
+      const local = listLocalOperations(project, location);
+      const brokerPath = `/v1/projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/operations`;
+      const brokerResult = await fetchBroker(brokerPath, { method: "GET" });
+      const brokerOps = Array.isArray(brokerResult.payload.operations) ? brokerResult.payload.operations : [];
+
+      const combined = [...local, ...brokerOps].sort(
+        (left, right) => safeEpoch(right.metadata?.createTime) - safeEpoch(left.metadata?.createTime),
+      );
+      const page = paginate(combined, requestUrl.searchParams, 200);
       return sendJson(res, 200, {
-        broker_base_url: brokerBaseUrl,
-        temporal_ui_url: temporalUiUrl,
-        trace_api_url: `http://${host}:${port}`,
+        operations: page.items,
+        nextPageToken: page.nextPageToken,
       });
     }
 
@@ -635,26 +1359,50 @@ async function handleRequest(req, res) {
     deriveTraceIds(events);
     const workflows = await loadBrokerWorkflows();
     const { traces, traceList } = buildTraceModel(events, workflows);
+    await annotateRuntimeState(traceList);
+
+    const workflowIndex = new Map();
+    for (const trace of traceList) {
+      const workflowId = String(trace.workflow_id ?? "").trim();
+      if (workflowId) {
+        workflowIndex.set(workflowId, trace);
+      }
+      workflowIndex.set(String(trace.trace_id), trace);
+    }
 
     if (req.method === "GET" && pathname === "/api/traces") {
       const filtered = applyTraceFilters(traceList, requestUrl.searchParams);
-      return sendJson(res, 200, {
-        traces: filtered.map((trace) => ({
-          trace_id: trace.trace_id,
-          workflow_id: trace.workflow_id,
-          source_bot: trace.source_bot,
-          mode: trace.mode,
-          ts_start: trace.ts_start,
-          ts_end: trace.ts_end,
-          status: trace.status,
-          requires_approval: trace.requires_approval,
-          approval: trace.approval,
-          event_count: trace.event_count,
-          executed_trade_count: trace.executed_trade_count,
-          latest_execution_ts: trace.latest_execution_ts,
-          latest_execution: trace.latest_execution,
-        })),
-      });
+      return sendJson(
+        res,
+        200,
+        {
+          traces: filtered.map((trace) => ({
+            trace_id: trace.trace_id,
+            workflow_id: trace.workflow_id,
+            source_bot: trace.source_bot,
+            mode: trace.mode,
+            ts_start: trace.ts_start,
+            ts_end: trace.ts_end,
+            status: trace.status,
+            state: trace.state,
+            runtime_state: trace.runtime_state,
+            requires_approval: trace.requires_approval,
+            approval: trace.approval,
+            cancel_state: trace.cancel_state,
+            control_locked: trace.control_locked,
+            available_actions: trace.available_actions,
+            event_count: trace.event_count,
+            executed_trade_count: trace.executed_trade_count,
+            latest_execution_ts: trace.latest_execution_ts,
+            latest_execution: trace.latest_execution,
+            last_command_at: trace.last_command_at,
+            last_command_by: trace.last_command_by,
+          })),
+        },
+        {
+          "x-observability-deprecated": "Use /v1/projects/*/locations/*/workflows",
+        },
+      );
     }
 
     if (req.method === "GET" && pathname === "/api/executions") {
@@ -666,9 +1414,16 @@ async function handleRequest(req, res) {
         .filter((item) => (botFilter ? item.source_bot === botFilter : true))
         .sort((a, b) => safeEpoch(b.ts) - safeEpoch(a.ts));
 
-      return sendJson(res, 200, {
-        executions: Number.isInteger(limit) && limit > 0 ? items.slice(0, limit) : items,
-      });
+      return sendJson(
+        res,
+        200,
+        {
+          executions: Number.isInteger(limit) && limit > 0 ? items.slice(0, limit) : items,
+        },
+        {
+          "x-observability-deprecated": "Use /v1/projects/*/locations/*/executions",
+        },
+      );
     }
 
     const traceMatch = pathname.match(/^\/api\/traces\/([^/]+)$/);
@@ -681,12 +1436,19 @@ async function handleRequest(req, res) {
           message: `Trace not found: ${traceId}`,
         });
       }
-      return sendJson(res, 200, trace);
+      return sendJson(
+        res,
+        200,
+        trace,
+        {
+          "x-observability-deprecated": "Use /v1/projects/*/locations/*/workflows/*",
+        },
+      );
     }
 
-    const eventsMatch = pathname.match(/^\/api\/traces\/([^/]+)\/events$/);
-    if (req.method === "GET" && eventsMatch) {
-      const traceId = decodeURIComponent(eventsMatch[1]);
+    const traceEventsMatch = pathname.match(/^\/api\/traces\/([^/]+)\/events$/);
+    if (req.method === "GET" && traceEventsMatch) {
+      const traceId = decodeURIComponent(traceEventsMatch[1]);
       const trace = traces.get(traceId);
       if (!trace) {
         return sendJson(res, 404, {
@@ -694,53 +1456,107 @@ async function handleRequest(req, res) {
           message: `Trace not found: ${traceId}`,
         });
       }
-      return sendJson(res, 200, {
-        trace_id: traceId,
-        events: trace.events.sort((a, b) => {
-          const left = a.ts ? Date.parse(a.ts) : 0;
-          const right = b.ts ? Date.parse(b.ts) : 0;
-          return (Number.isNaN(left) ? 0 : left) - (Number.isNaN(right) ? 0 : right);
-        }),
-      });
+      return sendJson(
+        res,
+        200,
+        {
+          trace_id: traceId,
+          events: trace.events.sort((a, b) => safeEpoch(a.ts) - safeEpoch(b.ts)),
+        },
+        {
+          "x-observability-deprecated": "Use /v1/projects/*/locations/*/workflows/*/events",
+        },
+      );
     }
 
     const approveMatch = pathname.match(/^\/api\/traces\/([^/]+)\/approve$/);
     if (req.method === "POST" && approveMatch) {
       const traceId = decodeURIComponent(approveMatch[1]);
-      const body = await readBodyJson(req);
-
-      let approvedBy =
-        typeof body?.approved_by === "string" ? body.approved_by.trim() : "";
-      if (!approvedBy) {
-        approvedBy = "operator";
-      } else if (approvedBy.length > 256) {
-        approvedBy = approvedBy.slice(0, 256);
-      }
-
-      let commandContext =
-        typeof body?.command_context === "string" ? body.command_context.trim() : "";
-      if (!commandContext) {
-        commandContext = "trace-api";
-      } else if (commandContext.length > 256) {
-        commandContext = commandContext.slice(0, 256);
-      }
-
-      const response = await fetch(`${brokerBaseUrl}/execution/${encodeURIComponent(traceId)}/approve`, {
+      const body = await readBodyJson(req).catch(() => ({}));
+      const response = await fetchBroker(`/execution/${encodeURIComponent(traceId)}/approve`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          approved_by: approvedBy,
-          command_context: commandContext,
+          approved_by: body.approved_by ?? "operator",
+          command_context: body.command_context ?? "trace-api-legacy",
         }),
       });
+      return sendJson(
+        res,
+        response.status,
+        response.payload,
+        {
+          "x-observability-deprecated": "Use /v1/projects/*/locations/*/workflows/*:execute",
+        },
+      );
+    }
 
-      const payload = await response.json().catch(() => ({
-        error: "broker_error",
-        message: "Invalid broker response",
-      }));
-      return sendJson(res, response.status, payload);
+    const v1WorkflowListMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/locations\/([^/]+)\/workflows$/);
+    if (req.method === "GET" && v1WorkflowListMatch) {
+      const project = decodeURIComponent(v1WorkflowListMatch[1]);
+      const location = decodeURIComponent(v1WorkflowListMatch[2]);
+
+      let resources = traceList.map((trace) => buildWorkflowResource(trace, project, location));
+      resources = applyWorkflowResourceFilters(resources, requestUrl.searchParams);
+      resources = orderWorkflowResources(resources, requestUrl.searchParams.get("orderBy"));
+      const page = paginate(resources, requestUrl.searchParams, 200);
+
+      return sendJson(res, 200, {
+        workflows: page.items,
+        nextPageToken: page.nextPageToken,
+      });
+    }
+
+    const v1WorkflowGetMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/locations\/([^/]+)\/workflows\/([^/:]+)$/);
+    if (req.method === "GET" && v1WorkflowGetMatch) {
+      const project = decodeURIComponent(v1WorkflowGetMatch[1]);
+      const location = decodeURIComponent(v1WorkflowGetMatch[2]);
+      const workflowId = decodeURIComponent(v1WorkflowGetMatch[3]);
+      const trace = workflowIndex.get(workflowId);
+
+      if (!trace) {
+        return sendGoogleError(res, 404, "NOT_FOUND", `Workflow not found: ${workflowId}`);
+      }
+
+      return sendJson(res, 200, buildWorkflowResource(trace, project, location));
+    }
+
+    const v1WorkflowEventsMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/locations\/([^/]+)\/workflows\/([^/:]+)\/events$/);
+    if (req.method === "GET" && v1WorkflowEventsMatch) {
+      const workflowId = decodeURIComponent(v1WorkflowEventsMatch[3]);
+      const trace = workflowIndex.get(workflowId);
+
+      if (!trace) {
+        return sendGoogleError(res, 404, "NOT_FOUND", `Workflow not found: ${workflowId}`);
+      }
+
+      const sortedEvents = [...(trace.events ?? [])].sort((a, b) => safeEpoch(a.ts) - safeEpoch(b.ts));
+      const page = paginate(sortedEvents, requestUrl.searchParams, 500);
+      return sendJson(res, 200, {
+        events: page.items,
+        nextPageToken: page.nextPageToken,
+      });
+    }
+
+    const v1ExecutionsMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/locations\/([^/]+)\/executions$/);
+    if (req.method === "GET" && v1ExecutionsMatch) {
+      const project = decodeURIComponent(v1ExecutionsMatch[1]);
+      const location = decodeURIComponent(v1ExecutionsMatch[2]);
+
+      let resources = buildExecutionResources(traceList, project, location);
+      const filter = parseFilter(requestUrl.searchParams.get("filter"));
+      const botFilter = requestUrl.searchParams.get("bot") ?? filter.source_bot;
+      if (botFilter) {
+        resources = resources.filter((item) => item.sourceBot === botFilter);
+      }
+
+      const page = paginate(resources, requestUrl.searchParams, 50);
+      return sendJson(res, 200, {
+        executions: page.items,
+        nextPageToken: page.nextPageToken,
+      });
     }
 
     return sendJson(res, 404, {
@@ -748,6 +1564,17 @@ async function handleRequest(req, res) {
       message: `No route for ${req.method} ${pathname}`,
     });
   } catch (error) {
+    if (error && typeof error === "object" && Number.isInteger(error.statusCode)) {
+      return sendGoogleError(
+        res,
+        error.statusCode,
+        error.googleStatus ?? "INVALID_ARGUMENT",
+        error.message ?? "Invalid request",
+      );
+    }
+    if (error instanceof SyntaxError) {
+      return sendGoogleError(res, 400, "INVALID_ARGUMENT", "Invalid JSON payload");
+    }
     return sendJson(res, 500, {
       error: "internal_error",
       message: error instanceof Error ? error.message : String(error),
@@ -768,6 +1595,10 @@ server.listen(port, host, () => {
         status: "listening",
         bind: `${host}:${port}`,
         trades_root: tradesRoot,
+        defaults: {
+          project: defaultProject,
+          location: defaultLocation,
+        },
       },
       null,
       2,

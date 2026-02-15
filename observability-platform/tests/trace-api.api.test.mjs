@@ -13,6 +13,9 @@ import {
 
 test("trace-api enforces auth, proxies control actions, and redacts config token", async (t) => {
   if (!(await canBindLocalhost())) {
+    if (process.env.CI === "true") {
+      assert.fail("TCP bind to localhost is unavailable in CI; observability API tests must run in pipeline");
+    }
     t.skip("TCP bind to localhost is not available in this environment");
     return;
   }
@@ -113,6 +116,9 @@ test("trace-api enforces auth, proxies control actions, and redacts config token
 
 test("trace-api rejects oversized control payloads before forwarding", async (t) => {
   if (!(await canBindLocalhost())) {
+    if (process.env.CI === "true") {
+      assert.fail("TCP bind to localhost is unavailable in CI; observability API tests must run in pipeline");
+    }
     t.skip("TCP bind to localhost is not available in this environment");
     return;
   }

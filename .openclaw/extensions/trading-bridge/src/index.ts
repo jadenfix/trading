@@ -49,6 +49,7 @@ class TradingClient extends EventEmitter {
       this.reconnectTimer = null;
     }
 
+    this.buffer = Buffer.alloc(0);
     this.rejectAllPending(new Error("Trading client stopped"));
 
     if (this.socket) {
@@ -112,6 +113,7 @@ class TradingClient extends EventEmitter {
       console.log("Disconnected from Trading Daemon");
       this.state.connected = false;
       this.socket = null;
+      this.buffer = Buffer.alloc(0);
       this.rejectAllPending(new Error("Trading daemon connection closed"));
       this.scheduleReconnect();
     });

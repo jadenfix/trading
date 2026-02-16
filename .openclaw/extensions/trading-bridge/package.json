@@ -1,0 +1,20 @@
+{
+    "name": "trading-bridge",
+    "version": "0.1.0",
+    "description": "OpenClaw Trading Bridge Extension",
+    "main": "dist/index.js",
+    "source": "src/index.ts",
+    "scripts": {
+        "build": "tsc",
+        "watch": "tsc -w"
+    },
+    "devDependencies": {
+        "@types/node": "^20.11.0",
+        "typescript": "^5.3.3"
+    },
+    "openclaw": {
+        "extensions": [
+            "./src/index.ts"
+        ]
+    }
+}

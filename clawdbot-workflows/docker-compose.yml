@@ -23,7 +23,7 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    command: [ "node", "dist/index.js", "gateway", "--bind", "${OPENCLAW_GATEWAY_BIND:-lan}", "--port", "18789" ]
+    command: [ "node", "dist/index.js", "gateway", "--bind", "${OPENCLAW_GATEWAY_BIND:-lan}", "--port", "18789", "--allow-unconfigured" ]
 
   trading-daemon:
     build:

@@ -21,6 +21,7 @@ type TradingCommand = "start" | "stop" | "status" | "ping";
 const DEFAULT_SOCKET_PATH = "/var/run/openclaw/trading.sock";
 const RECONNECT_DELAY_MS = 3_000;
 const REQUEST_TIMEOUT_MS = 5_000;
+const MAX_FRAME_LENGTH = 1_048_576; // 1 MiB
 
 class TradingClient extends EventEmitter {
   private readonly socketPath: string;
@@ -139,6 +140,11 @@ class TradingClient extends EventEmitter {
 
     while (this.buffer.length >= 4) {
       const length = this.buffer.readUInt32BE(0);
+      if (length > MAX_FRAME_LENGTH) {
+        this.buffer = Buffer.alloc(0);
+        this.socket?.destroy(new Error(`Trading frame exceeds max size (${length} bytes)`));
+        return;
+      }
       if (this.buffer.length < 4 + length) {
         break;
       }
@@ -183,6 +189,9 @@ class TradingClient extends EventEmitter {
     }
 
     const body = Buffer.from(JSON.stringify(envelope), "utf8");
+    if (body.length > MAX_FRAME_LENGTH) {
+      throw new Error(`Trading frame exceeds max size (${body.length} bytes)`);
+    }
     const length = Buffer.alloc(4);
     length.writeUInt32BE(body.length, 0);
 
@@ -272,12 +281,30 @@ export default async function (api: any) {
       required: ["command"],
     },
     execute: async ({ command }: { command: TradingCommand }) => {
-      const response = await client.request(toControlKind(command), {});
-      return {
-        sent: true,
-        command,
-        response: response.payload,
-      };
+      if (!client.state.connected) {
+        return {
+          sent: false,
+          command,
+          connected: false,
+          error: "Trading daemon is not connected",
+        };
+      }
+
+      try {
+        const response = await client.request(toControlKind(command), {});
+        return {
+          sent: true,
+          command,
+          response: response.payload,
+        };
+      } catch (error) {
+        return {
+          sent: false,
+          command,
+          connected: client.state.connected,
+          error: toErrorMessage(error),
+        };
+      }
     },
   });
 

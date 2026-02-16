@@ -1,5 +1,6 @@
-package:
+packages:
   - 'non-agent-workflows'
   - 'clawdbot-workflows'
   - 'llm-workflows'
+  # Extension is loaded from the root OpenClaw config directory during local dev.
   - '.openclaw/extensions/trading-bridge'

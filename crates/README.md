@@ -45,10 +45,10 @@ This brings up:
 Quick verification:
 
 ```bash
-docker exec trading-trading-daemon-1 tradingctl ping
-docker exec trading-trading-daemon-1 tradingctl status
-docker exec trading-trading-daemon-1 tradingctl start
-docker exec trading-trading-daemon-1 tradingctl stop
+docker compose -f clawdbot-workflows/docker-compose.yml --project-directory . exec trading-daemon tradingctl ping
+docker compose -f clawdbot-workflows/docker-compose.yml --project-directory . exec trading-daemon tradingctl status
+docker compose -f clawdbot-workflows/docker-compose.yml --project-directory . exec trading-daemon tradingctl start
+docker compose -f clawdbot-workflows/docker-compose.yml --project-directory . exec trading-daemon tradingctl stop
 ```
 
 ## Local Run (Without Docker)

@@ -4,4 +4,7 @@ members = [
     "trading_protocol",
     "trading_daemon",
     "tradingctl",
+    "exchange_core",
+    "strategy_core",
+    "risk_core",
 ]

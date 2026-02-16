@@ -9,10 +9,9 @@ COPY crates/Cargo.toml crates/Cargo.lock ./crates/
 COPY crates/trading_protocol ./crates/trading_protocol
 COPY crates/trading_daemon ./crates/trading_daemon
 COPY crates/tradingctl ./crates/tradingctl
-
-# Copy shared libraries referenced as path dependencies.
-COPY non-agent-workflows/libs/common ./non-agent-workflows/libs/common
-COPY non-agent-workflows/libs/kalshi_client ./non-agent-workflows/libs/kalshi_client
+COPY crates/exchange_core ./crates/exchange_core
+COPY crates/strategy_core ./crates/strategy_core
+COPY crates/risk_core ./crates/risk_core
 
 WORKDIR /app/crates
 RUN cargo build --release --bin trading_daemon --bin tradingctl

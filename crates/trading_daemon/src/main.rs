@@ -114,6 +114,7 @@ fn bind_listener(socket_path: &str) -> Result<UnixListener> {
     let listener = UnixListener::bind(socket_path)
         .with_context(|| format!("Failed to bind UDS socket {}", socket_path))?;
     #[cfg(unix)]
+    // Containers run as uid/gid 1000, so owner/group write access is sufficient.
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
         .with_context(|| format!("Failed to set socket permissions on {}", socket_path))?;
     info!("Listening on {}", socket_path);

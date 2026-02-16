@@ -1,5 +1,6 @@
 services:
   openclaw-gateway:
+    # Build local source and tag it as OPENCLAW_IMAGE so openclaw-cli can reuse it.
     build:
       context: ./clawdbot-workflows
       dockerfile: Dockerfile
@@ -33,6 +34,7 @@ services:
     env_file:
       - .env
     user: "1000:1000"
+    init: true
     restart: unless-stopped
 
   openclaw-cli:

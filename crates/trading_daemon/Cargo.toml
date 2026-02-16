@@ -10,6 +10,7 @@ serde_json = "1.0"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+# Pre-declared for upcoming Kalshi market integration work.
 kalshi_client = { path = "../../non-agent-workflows/libs/kalshi_client" }
 futures = "0.3"
 fs2 = "0.4" # For file locking

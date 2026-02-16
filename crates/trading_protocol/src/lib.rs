@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const DEFAULT_SOCKET_PATH: &str = "/var/run/openclaw/trading.sock";
+pub const MAX_FRAME_LENGTH: usize = 1024 * 1024; // 1 MiB
 
 /// 4-byte Big-Endian length-prefixed JSON codec.
 pub type JsonCodec = LengthDelimitedCodec;
@@ -11,6 +12,7 @@ pub type JsonCodec = LengthDelimitedCodec;
 pub fn create_codec() -> JsonCodec {
     LengthDelimitedCodec::builder()
         .length_field_length(4)
+        .max_frame_length(MAX_FRAME_LENGTH)
         .new_codec()
 }
 

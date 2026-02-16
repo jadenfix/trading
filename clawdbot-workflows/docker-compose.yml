@@ -1,5 +1,9 @@
 services:
   openclaw-gateway:
+    # Build local source and tag it as OPENCLAW_IMAGE so openclaw-cli can reuse it.
+    build:
+      context: ./clawdbot-workflows
+      dockerfile: Dockerfile
     image: ${OPENCLAW_IMAGE:-openclaw:local}
     environment:
       HOME: /home/node
@@ -11,21 +15,27 @@ services:
     volumes:
       - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
+      - openclaw-socket-vol:/var/run/openclaw
     ports:
       - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
       - "${OPENCLAW_BRIDGE_PORT:-18790}:18790"
     init: true
     restart: unless-stopped
-    command:
-      [
-        "node",
-        "dist/index.js",
-        "gateway",
-        "--bind",
-        "${OPENCLAW_GATEWAY_BIND:-lan}",
-        "--port",
-        "18789",
-      ]
+    env_file:
+      - .env
+    command: [ "node", "dist/index.js", "gateway", "--bind", "${OPENCLAW_GATEWAY_BIND:-lan}", "--port", "18789", "--allow-unconfigured" ]
+
+  trading-daemon:
+    build:
+      context: .
+      dockerfile: crates/trading_daemon/Dockerfile
+    volumes:
+      - openclaw-socket-vol:/var/run/openclaw
+    env_file:
+      - .env
+    user: "1000:1000"
+    init: true
+    restart: unless-stopped
 
   openclaw-cli:
     image: ${OPENCLAW_IMAGE:-openclaw:local}
@@ -40,7 +50,11 @@ services:
     volumes:
       - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
+      - openclaw-socket-vol:/var/run/openclaw
     stdin_open: true
     tty: true
     init: true
-    entrypoint: ["node", "dist/index.js"]
+    entrypoint: [ "node", "dist/index.js" ]
+
+volumes:
+  openclaw-socket-vol:

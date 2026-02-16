@@ -16,6 +16,25 @@ Monorepo for four trading/automation tracks:
 | [`llm-workflows`](./llm-workflows) | LLM trading experiments and prototypes | [`llm-workflows/README.md`](./llm-workflows/README.md) |
 | [`observability-platform`](./observability-platform) | Unified traces, Google-style control API, dashboard, sports worker | [`observability-platform/README.md`](./observability-platform/README.md) |
 
+## OpenClaw Rust Trading Bridge
+
+This repo now includes a low-latency Rust bridge for OpenClaw trade control over a Unix domain socket:
+
+- `crates/trading_daemon`: Rust daemon exposing the UDS control endpoint (`/var/run/openclaw/trading.sock`)
+- `crates/trading_protocol`: shared framing + envelope protocol
+- `crates/tradingctl`: CLI client for ping/start/stop/status checks
+- `.openclaw/extensions/trading-bridge`: OpenClaw tool bridge exposing `trading_status` and `trading_control`
+
+Run it with:
+
+```bash
+docker compose -f clawdbot-workflows/docker-compose.yml --project-directory . up -d --build
+```
+
+Detailed bridge architecture and usage:
+
+- [`crates/README.md`](./crates/README.md)
+
 ## Architecture (High Level)
 
 ```text

@@ -228,12 +228,12 @@ function toErrorMessage(error: unknown): string {
 
 // OpenClaw extension entry point.
 // @ts-ignore
-export default async function (api: any) {
+export default function (api: any) {
   const socketPath = api?.config?.socketPath ?? process.env.TRADING_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
   const client = new TradingClient(socketPath);
 
   api.registerService({
-    name: "trading-bridge",
+    id: "trading-bridge",
     start: async () => undefined,
     stop: async () => {
       client.dispose();

@@ -16,6 +16,15 @@ KNOWN_COMMANDS=(
   temporal
   observability
   sports-agent
+  clawdbot-trading
+  clawdbot-trading-up
+  clawdbot-trading-down
+  clawdbot-trading-ps
+  clawdbot-trading-logs
+  clawdbot-trading-ping
+  clawdbot-trading-status
+  clawdbot-trading-start
+  clawdbot-trading-stop
   dev
   down
   status
@@ -36,6 +45,13 @@ Commands:
   ./trading-cli temporal [up|down|status|logs|ui|list|describe|show]          # temporal debugger/server orchestrator
   ./trading-cli observability [up|down|status|logs|ui] [service]              # observability stack orchestrator
   ./trading-cli sports-agent [go|up|down|status|logs|approve|execute|cancel|hard-cancel|stop-service] [--mode <hitl|auto_ultra_strict>] [--dry-run] <workflow_id_or_trace_id>
+  ./trading-cli clawdbot-trading [up|down|ps|logs|ping|status|start|stop] [service]
+                                                                         # OpenClaw + Rust trading bridge controls (up checks required service health)
+  ./trading-cli clawdbot-trading-up|clawdbot-trading-down|clawdbot-trading-ps
+                                                                         # convenience aliases for compose lifecycle
+  ./trading-cli clawdbot-trading-ping|clawdbot-trading-status|clawdbot-trading-start|clawdbot-trading-stop
+                                                                         # convenience aliases for tradingctl
+                                                                         # note: openclaw-cli is an on-demand helper container and may be Exited
   ./trading-cli dev                                 # launch weather+arbitrage+llm-workflow (bg)
   ./trading-cli down                                # stop all background services
   ./trading-cli status                              # show all background service statuses
@@ -72,6 +88,12 @@ Examples:
   ./trading-cli temporal describe <workflow_id>
   ./trading-cli observability up
   ./trading-cli observability ui
+  ./trading-cli clawdbot-trading up
+  ./trading-cli clawdbot-trading ping
+  ./trading-cli clawdbot-trading status
+  ./trading-cli clawdbot-trading start
+  ./trading-cli clawdbot-trading stop
+  ./trading-cli clawdbot-trading down
   ./trading-cli sports-agent up --mode hitl
   ./trading-cli sports-agent execute <workflow_id_or_trace_id>
   ./trading-cli sports-agent cancel <workflow_id_or_trace_id>
@@ -380,6 +402,163 @@ require_js_runtime() {
     echo "macOS install example: brew install node" >&2
     exit 1
   fi
+}
+
+docker_compose_bin() {
+  local docker_bin
+  docker_bin="$(resolve_cmd docker || true)"
+  if [[ -z "$docker_bin" ]]; then
+    echo "Docker is required for clawdbot-trading commands." >&2
+    echo "Install Docker Desktop and retry." >&2
+    return 1
+  fi
+  if ! "$docker_bin" compose version >/dev/null 2>&1; then
+    echo "Docker Compose v2 is required for clawdbot-trading commands." >&2
+    return 1
+  fi
+  echo "$docker_bin"
+}
+
+clawdbot_trading_compose_file() {
+  echo "$ROOT_DIR/clawdbot-workflows/docker-compose.yml"
+}
+
+clawdbot_trading_container_id() {
+  local docker_bin="$1"
+  local compose_file="$2"
+  local service="$3"
+  "$docker_bin" compose -f "$compose_file" --project-directory "$ROOT_DIR" ps -q "$service" 2>/dev/null || true
+}
+
+clawdbot_trading_service_state() {
+  local docker_bin="$1"
+  local compose_file="$2"
+  local service="$3"
+
+  local container_id
+  container_id="$(clawdbot_trading_container_id "$docker_bin" "$compose_file" "$service")"
+  if [[ -z "$container_id" ]]; then
+    echo "missing"
+    return
+  fi
+
+  local state
+  state="$("$docker_bin" inspect -f '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
+  if [[ -z "$state" ]]; then
+    echo "unknown"
+    return
+  fi
+  echo "$state"
+}
+
+clawdbot_trading_wait_for_required_services() {
+  local docker_bin="$1"
+  local compose_file="$2"
+  local timeout_seconds="${3:-30}"
+
+  local start_epoch now
+  start_epoch="$(date +%s)"
+
+  while true; do
+    local daemon_state gateway_state
+    daemon_state="$(clawdbot_trading_service_state "$docker_bin" "$compose_file" "trading-daemon" || true)"
+    gateway_state="$(clawdbot_trading_service_state "$docker_bin" "$compose_file" "openclaw-gateway" || true)"
+
+    if [[ "$daemon_state" == "running" && "$gateway_state" == "running" ]]; then
+      local cli_state
+      cli_state="$(clawdbot_trading_service_state "$docker_bin" "$compose_file" "openclaw-cli" || true)"
+
+      echo
+      echo "Trading bridge services are up:"
+      echo "  trading-daemon: $daemon_state"
+      echo "  openclaw-gateway: $gateway_state"
+      echo "  openclaw-cli: ${cli_state:-unknown} (ephemeral helper container; may be exited)"
+      return 0
+    fi
+
+    now="$(date +%s)"
+    if (( now - start_epoch >= timeout_seconds )); then
+      echo >&2
+      echo "Timed out waiting for required trading bridge services to be healthy." >&2
+      echo "Required services:" >&2
+      echo "  trading-daemon: ${daemon_state:-unknown}" >&2
+      echo "  openclaw-gateway: ${gateway_state:-unknown}" >&2
+      echo >&2
+      echo "Recent logs (openclaw-gateway, trading-daemon):" >&2
+      "$docker_bin" compose -f "$compose_file" --project-directory "$ROOT_DIR" logs --tail=80 openclaw-gateway trading-daemon >&2 || true
+      return 1
+    fi
+
+    sleep 1
+  done
+}
+
+run_clawdbot_trading() {
+  local action="${1:-status}"
+  shift || true
+
+  local docker_bin compose_file
+  docker_bin="$(docker_compose_bin)" || exit 1
+  compose_file="$(clawdbot_trading_compose_file)"
+
+  case "$action" in
+    up)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for clawdbot-trading up command" >&2
+        echo "Use: ./trading-cli clawdbot-trading up" >&2
+        exit 1
+      fi
+      "$docker_bin" compose -f "$compose_file" --project-directory "$ROOT_DIR" up -d --build
+      local timeout_seconds="${CLAWDBOT_TRADING_UP_TIMEOUT_SECONDS:-30}"
+      clawdbot_trading_wait_for_required_services "$docker_bin" "$compose_file" "$timeout_seconds"
+      ;;
+    down)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for clawdbot-trading down command" >&2
+        echo "Use: ./trading-cli clawdbot-trading down" >&2
+        exit 1
+      fi
+      "$docker_bin" compose -f "$compose_file" --project-directory "$ROOT_DIR" down
+      ;;
+    ps|services)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for clawdbot-trading ps command" >&2
+        echo "Use: ./trading-cli clawdbot-trading ps" >&2
+        exit 1
+      fi
+      "$docker_bin" compose -f "$compose_file" --project-directory "$ROOT_DIR" ps
+      ;;
+    logs)
+      local service="${1:-trading-daemon}"
+      if [[ $# -gt 1 ]]; then
+        echo "Too many arguments for clawdbot-trading logs command" >&2
+        echo "Use: ./trading-cli clawdbot-trading logs [trading-daemon|openclaw-gateway|openclaw-cli]" >&2
+        exit 1
+      fi
+      case "$service" in
+        trading-daemon|openclaw-gateway|openclaw-cli) ;;
+        *)
+          echo "Unknown clawdbot-trading service: $service" >&2
+          echo "Use: ./trading-cli clawdbot-trading logs [trading-daemon|openclaw-gateway|openclaw-cli]" >&2
+          exit 1
+          ;;
+      esac
+      "$docker_bin" compose -f "$compose_file" --project-directory "$ROOT_DIR" logs -f "$service"
+      ;;
+    ping|status|start|stop)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for clawdbot-trading $action command" >&2
+        echo "Use: ./trading-cli clawdbot-trading $action" >&2
+        exit 1
+      fi
+      "$docker_bin" compose -f "$compose_file" --project-directory "$ROOT_DIR" exec trading-daemon tradingctl "$action"
+      ;;
+    *)
+      echo "Unknown clawdbot-trading action: $action" >&2
+      echo "Use: ./trading-cli clawdbot-trading [up|down|ps|logs|ping|status|start|stop]" >&2
+      exit 1
+      ;;
+  esac
 }
 
 temporal_reachable() {
@@ -1221,6 +1400,33 @@ main() {
       ;;
     sports-agent|sports)
       run_sports_agent "$@"
+      ;;
+    clawdbot-trading)
+      run_clawdbot_trading "$@"
+      ;;
+    clawdbot-trading-up)
+      run_clawdbot_trading up "$@"
+      ;;
+    clawdbot-trading-down)
+      run_clawdbot_trading down "$@"
+      ;;
+    clawdbot-trading-ps)
+      run_clawdbot_trading ps "$@"
+      ;;
+    clawdbot-trading-logs)
+      run_clawdbot_trading logs "$@"
+      ;;
+    clawdbot-trading-ping)
+      run_clawdbot_trading ping "$@"
+      ;;
+    clawdbot-trading-status)
+      run_clawdbot_trading status "$@"
+      ;;
+    clawdbot-trading-start)
+      run_clawdbot_trading start "$@"
+      ;;
+    clawdbot-trading-stop)
+      run_clawdbot_trading stop "$@"
       ;;
     dev)
       run_dev

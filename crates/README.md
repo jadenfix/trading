@@ -32,7 +32,7 @@ Protocol details:
 From repo root:
 
 ```bash
-docker compose -f clawdbot-workflows/docker-compose.yml --project-directory . up -d --build
+./trading-cli clawdbot-trading-up
 ```
 
 This brings up:
@@ -45,10 +45,23 @@ This brings up:
 Quick verification:
 
 ```bash
-docker compose -f clawdbot-workflows/docker-compose.yml --project-directory . exec trading-daemon tradingctl ping
-docker compose -f clawdbot-workflows/docker-compose.yml --project-directory . exec trading-daemon tradingctl status
-docker compose -f clawdbot-workflows/docker-compose.yml --project-directory . exec trading-daemon tradingctl start
-docker compose -f clawdbot-workflows/docker-compose.yml --project-directory . exec trading-daemon tradingctl stop
+./trading-cli clawdbot-trading-ping
+./trading-cli clawdbot-trading-status
+./trading-cli clawdbot-trading-start
+./trading-cli clawdbot-trading-stop
+./trading-cli clawdbot-trading-ps
+```
+
+Expected status after `clawdbot-trading-up`:
+
+- `trading-daemon`: `Up` (required)
+- `openclaw-gateway`: `Up` (required)
+- `openclaw-cli`: may be `Exited` (normal; this is an on-demand CLI helper container)
+
+Shutdown:
+
+```bash
+./trading-cli clawdbot-trading-down
 ```
 
 ## Local Run (Without Docker)
@@ -104,4 +117,4 @@ Socket path configuration:
 
 - `Missing config. Run openclaw setup ...` from `openclaw-gateway`
   - Cause: OpenClaw config dir is mounted but not initialized.
-  - Fix: initialize your config in `${OPENCLAW_CONFIG_DIR}` (for example run setup once or set `gateway.mode=local`).
+  - Fix: compose starts gateway with `--allow-unconfigured` by default for local bridge bring-up; run `openclaw setup` when you want full configured gateway behavior.

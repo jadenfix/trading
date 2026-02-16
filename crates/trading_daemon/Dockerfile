@@ -1,0 +1,37 @@
+FROM rust:1-slim-bookworm AS builder
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*
+
+# Copy only bridge workspace crates.
+COPY crates/Cargo.toml crates/Cargo.lock ./crates/
+COPY crates/trading_protocol ./crates/trading_protocol
+COPY crates/trading_daemon ./crates/trading_daemon
+COPY crates/tradingctl ./crates/tradingctl
+
+# Copy shared libraries referenced as path dependencies.
+COPY non-agent-workflows/libs/common ./non-agent-workflows/libs/common
+COPY non-agent-workflows/libs/kalshi_client ./non-agent-workflows/libs/kalshi_client
+
+WORKDIR /app/crates
+RUN cargo build --release --bin trading_daemon --bin tradingctl
+
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+# Install runtime dependencies (OpenSSL, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
+
+# Copy binary
+COPY --from=builder /app/crates/target/release/trading_daemon /usr/local/bin/trading_daemon
+COPY --from=builder /app/crates/target/release/tradingctl /usr/local/bin/tradingctl
+
+# Create socket directory with correct permissions
+RUN mkdir -p /var/run/openclaw && chown 1000:1000 /var/run/openclaw
+
+# Run as non-root
+USER 1000:1000
+
+CMD ["trading_daemon"]

@@ -7,3 +7,12 @@ TRADES/*
 !TRADES/README.md
 .trading-cli/
 target/
+
+# OpenClaw runtime state (keep only extensions in git)
+.openclaw/agents/
+.openclaw/canvas/
+.openclaw/cron/
+.openclaw/update-check.json
+
+# Local nested repo used by tooling; not part of this monorepo
+workspace/

@@ -1,0 +1,18 @@
+# Keep root-context Docker builds small and deterministic.
+**
+
+# Rust trading bridge workspace.
+!crates/
+!crates/**
+
+# Shared Rust libs used by trading_daemon path dependencies.
+!non-agent-workflows/
+!non-agent-workflows/libs/
+!non-agent-workflows/libs/common/
+!non-agent-workflows/libs/common/**
+!non-agent-workflows/libs/kalshi_client/
+!non-agent-workflows/libs/kalshi_client/**
+
+# Never send local Rust artifacts to Docker.
+**/target/
+**/target/**

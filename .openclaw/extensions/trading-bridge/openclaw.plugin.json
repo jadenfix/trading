@@ -1,0 +1,20 @@
+{
+    "$schema": "https://openclaw.dev/schema/plugin.json",
+    "id": "trading-bridge",
+    "name": "Trading Bridge",
+    "description": "High-performance trading engine integration via UDS.",
+    "version": "0.1.0",
+    "configSchema": {
+        "type": "object",
+        "properties": {
+            "socketPath": {
+                "type": "string",
+                "default": "/var/run/openclaw/trading.sock",
+                "description": "Path to the Trading Daemon UDS socket"
+            }
+        }
+    },
+    "uiHints": {
+        "icon": "chart-line"
+    }
+}

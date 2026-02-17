@@ -68,6 +68,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f0e0fee31ef5ed1ba1316088939cea399010ed7731dba877ed44aeb407a75ea"
 
 [[package]]
+name = "async-trait"
+version = "0.1.89"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -201,10 +212,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "exchange_coinbase_spot"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "exchange_core",
+ "tokio",
+ "trading_domain",
+ "uuid",
+]
+
+[[package]]
 name = "exchange_core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "serde",
+ "trading_domain",
+]
+
+[[package]]
+name = "exchange_derivatives_paper"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "exchange_core",
+ "tokio",
+ "trading_domain",
+ "uuid",
+]
+
+[[package]]
+name = "exchange_kalshi"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "exchange_core",
+ "tokio",
+ "trading_domain",
+ "uuid",
 ]
 
 [[package]]
@@ -702,6 +751,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "strategy_crypto_momentum"
+version = "0.1.0"
+dependencies = [
+ "exchange_core",
+ "strategy_core",
+ "trading_domain",
+]
+
+[[package]]
+name = "strategy_kalshi_arbitrage"
+version = "0.1.0"
+dependencies = [
+ "exchange_core",
+ "strategy_core",
+ "trading_domain",
+]
+
+[[package]]
+name = "strategy_kalshi_weather"
+version = "0.1.0"
+dependencies = [
+ "exchange_core",
+ "strategy_core",
+ "trading_domain",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -847,6 +923,13 @@ dependencies = [
  "tracing-subscriber",
  "trading_protocol",
  "uuid",
+]
+
+[[package]]
+name = "trading_domain"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

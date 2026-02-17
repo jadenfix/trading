@@ -36,6 +36,7 @@ const DEFAULT_SOCKET_PATH = "/var/run/openclaw/trading.sock";
 const RECONNECT_DELAY_MS = 3_000;
 const REQUEST_TIMEOUT_MS = 5_000;
 const MAX_FRAME_LENGTH = 1_048_576; // 1 MiB
+const DEFAULT_CANDIDATE_CANARY_NOTIONAL_CENTS = 250; // Intentional low default for safe canary bootstrap.
 
 class TradingClient extends EventEmitter {
   private readonly socketPath: string;
@@ -228,6 +229,7 @@ function toCommandKind(command: TradingControlCommand): string {
     case "stop":
       return "Control.Stop";
     case "status":
+      // Keep legacy clients coherent: "status" uses Engine.Status even if daemon still accepts Control.Status.
       return "Engine.Status";
     case "ping":
       return "Control.Ping";
@@ -484,7 +486,7 @@ export default function (api: any) {
               requested_canary_notional_cents:
                 typeof input.requested_canary_notional_cents === "number"
                   ? input.requested_canary_notional_cents
-                  : 250,
+                  : DEFAULT_CANDIDATE_CANARY_NOTIONAL_CENTS,
               compile_passed: typeof input.compile_passed === "boolean" ? input.compile_passed : true,
               replay_passed: typeof input.replay_passed === "boolean" ? input.replay_passed : true,
               paper_passed: typeof input.paper_passed === "boolean" ? input.paper_passed : true,
@@ -500,7 +502,7 @@ export default function (api: any) {
               requested_canary_notional_cents:
                 typeof input.requested_canary_notional_cents === "number"
                   ? input.requested_canary_notional_cents
-                  : 250,
+                  : DEFAULT_CANDIDATE_CANARY_NOTIONAL_CENTS,
               auto: typeof input.auto === "boolean" ? input.auto : true,
             };
             break;
@@ -556,6 +558,7 @@ export default function (api: any) {
   });
 
   client.on("envelope", (envelope: Envelope) => {
+    // Broadcast both generic alerts and explicit risk alerts to operator channels.
     if (envelope.type !== "Event.Alert" && envelope.type !== "Event.RiskAlert") {
       return;
     }

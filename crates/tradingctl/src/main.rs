@@ -99,6 +99,19 @@ enum Commands {
     },
 }
 
+fn parse_risk_override_value(raw: &str) -> serde_json::Value {
+    match serde_json::from_str(raw) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!(
+                "Warning: failed to parse risk override value as JSON ({}). Treating as plain string: {}",
+                err, raw
+            );
+            serde_json::Value::String(raw.to_string())
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -174,10 +187,7 @@ async fn main() -> Result<()> {
         }
         Commands::RiskStatus => (RiskCommand::Status.as_kind(), serde_json::json!({})),
         Commands::RiskOverride { action, value } => {
-            let parsed_value = value.as_ref().map(|raw| {
-                serde_json::from_str(raw)
-                    .unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
-            });
+            let parsed_value = value.as_ref().map(|raw| parse_risk_override_value(raw));
 
             let payload = RiskOverridePayload {
                 action,
@@ -205,4 +215,22 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_risk_override_value;
+    use serde_json::json;
+
+    #[test]
+    fn parse_risk_override_value_parses_json() {
+        let parsed = parse_risk_override_value(r#"{"enabled":true}"#);
+        assert_eq!(parsed, json!({ "enabled": true }));
+    }
+
+    #[test]
+    fn parse_risk_override_value_falls_back_to_string() {
+        let parsed = parse_risk_override_value("{");
+        assert_eq!(parsed, serde_json::Value::String("{".to_string()));
+    }
 }

@@ -1,0 +1,9 @@
+[package]
+name = "strategy_kalshi_arbitrage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+exchange_core = { path = "../exchange_core" }
+strategy_core = { path = "../strategy_core" }
+trading_domain = { path = "../trading_domain" }

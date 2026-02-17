@@ -27,6 +27,9 @@ KNOWN_COMMANDS=(
   clawdbot-trading-doctor
   clawdbot-trading-start
   clawdbot-trading-stop
+  clawdbot-trading-venue-list
+  clawdbot-trading-portfolio-balances
+  clawdbot-trading-portfolio-positions
   dev
   down
   status
@@ -47,12 +50,14 @@ Commands:
   ./trading-cli temporal [up|down|status|logs|ui|list|describe|show]          # temporal debugger/server orchestrator
   ./trading-cli observability [up|down|status|logs|ui] [service]              # observability stack orchestrator
   ./trading-cli sports-agent [go|up|down|status|logs|approve|execute|cancel|hard-cancel|stop-service] [--mode <hitl|auto_ultra_strict>] [--dry-run] <workflow_id_or_trace_id>
-  ./trading-cli clawdbot-trading [up|down|ps|logs|ping|status|capabilities|doctor|start|stop] [service]
+  ./trading-cli clawdbot-trading [up|down|ps|logs|ping|status|capabilities|doctor|start|stop|venue-list|venue-status|venue-enable|venue-disable|portfolio-balances|portfolio-positions|order-list|order-cancel|order-submit|execution-mode-get|execution-mode-set] [args...]
                                                                          # OpenClaw + Rust trading bridge controls (up checks required service health)
   ./trading-cli clawdbot-trading-up|clawdbot-trading-down|clawdbot-trading-ps
                                                                          # convenience aliases for compose lifecycle
   ./trading-cli clawdbot-trading-ping|clawdbot-trading-status|clawdbot-trading-capabilities|clawdbot-trading-doctor|clawdbot-trading-start|clawdbot-trading-stop
                                                                          # convenience aliases for bridge health/control
+  ./trading-cli clawdbot-trading-venue-list|clawdbot-trading-portfolio-balances|clawdbot-trading-portfolio-positions
+                                                                         # convenience aliases for additive multi-asset controls
                                                                          # note: openclaw-cli is an on-demand helper container and may be Exited
   ./trading-cli dev                                 # launch weather+arbitrage+llm-workflow (bg)
   ./trading-cli down                                # stop all background services
@@ -97,6 +102,9 @@ Examples:
   ./trading-cli clawdbot-trading doctor
   ./trading-cli clawdbot-trading start
   ./trading-cli clawdbot-trading stop
+  ./trading-cli clawdbot-trading venue-list
+  ./trading-cli clawdbot-trading portfolio-balances
+  ./trading-cli clawdbot-trading execution-mode-get --venue-id kalshi --market-type binary
   ./trading-cli clawdbot-trading down
   ./trading-cli sports-agent up --mode hitl
   ./trading-cli sports-agent execute <workflow_id_or_trace_id>
@@ -749,9 +757,12 @@ run_clawdbot_trading() {
       fi
       "$docker_bin" compose -f "$compose_file" --project-directory "$ROOT_DIR" exec trading-daemon tradingctl "$action"
       ;;
+    venue-list|venue-enable|venue-disable|venue-status|portfolio-balances|portfolio-positions|order-submit|order-cancel|order-list|execution-mode-get|execution-mode-set)
+      "$docker_bin" compose -f "$compose_file" --project-directory "$ROOT_DIR" exec trading-daemon tradingctl "$action" "$@"
+      ;;
     *)
       echo "Unknown clawdbot-trading action: $action" >&2
-      echo "Use: ./trading-cli clawdbot-trading [up|down|ps|logs|ping|status|capabilities|doctor|start|stop]" >&2
+      echo "Use: ./trading-cli clawdbot-trading [up|down|ps|logs|ping|status|capabilities|doctor|start|stop|venue-list|venue-status|venue-enable|venue-disable|portfolio-balances|portfolio-positions|order-list|order-cancel|order-submit|execution-mode-get|execution-mode-set]" >&2
       exit 1
       ;;
   esac
@@ -1629,6 +1640,15 @@ main() {
       ;;
     clawdbot-trading-stop)
       run_clawdbot_trading stop "$@"
+      ;;
+    clawdbot-trading-venue-list)
+      run_clawdbot_trading venue-list "$@"
+      ;;
+    clawdbot-trading-portfolio-balances)
+      run_clawdbot_trading portfolio-balances "$@"
+      ;;
+    clawdbot-trading-portfolio-positions)
+      run_clawdbot_trading portfolio-positions "$@"
       ;;
     dev)
       run_dev

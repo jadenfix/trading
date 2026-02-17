@@ -487,7 +487,6 @@ function extractEngineStrategies(engineStatus: unknown): Array<Record<string, un
 
 function preconditionCheck(action: TradingHftAction, input: TradingHftRequest, ctx: ActionContext): ConfidenceCheck {
   const engineState = extractEngineState(ctx.engineStatus);
-  const riskState = extractRiskState(ctx.riskStatus);
   const strategies = extractEngineStrategies(ctx.engineStatus);
 
   switch (action) {
@@ -502,7 +501,7 @@ function preconditionCheck(action: TradingHftAction, input: TradingHftRequest, c
       };
     }
     case "risk_reset_kill_switch": {
-      const killSwitch = riskState?.kill_switch_engaged;
+      const killSwitch = engineState?.kill_switch_engaged;
       return {
         name: "action_precondition",
         passed: killSwitch === true,

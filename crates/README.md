@@ -7,8 +7,11 @@ Low-latency bridge between OpenClaw tools and a Rust trading daemon over a Unix 
 | Path | Purpose |
 | --- | --- |
 | `trading_protocol` | Shared frame codec + envelope schema (`type`, `id`, `payload`) |
-| `trading_daemon` | UDS server (`/var/run/openclaw/trading.sock`) handling control commands |
+| `trading_daemon` | UDS server (`/var/run/openclaw/trading.sock`) handling engine/strategy/risk commands |
 | `tradingctl` | CLI client for `ping`, `status`, `start`, and `stop` |
+| `exchange_core` | Venue abstraction traits and normalized order/account types |
+| `strategy_core` | Regime-aware strategy interface + signal intent schema |
+| `risk_core` | Non-bypassable hard safety-cage policy and evaluators |
 | `../.openclaw/extensions/trading-bridge` | OpenClaw extension exposing tools to Clawdbot |
 
 ## How It Works
@@ -23,7 +26,7 @@ Protocol details:
 - Envelope fields:
   - `v`: protocol version
   - `id`: request/response correlation UUID
-  - `type`: command kind (for example `Control.Status`)
+  - `type`: command kind (for example `Engine.Status`)
   - `ts_ms`: timestamp (ms)
   - `payload`: JSON object
 
@@ -87,6 +90,10 @@ The extension registers:
 
 - `trading_status`: returns bridge connectivity and daemon status payload
 - `trading_control`: accepts `command` in `start | stop | status | ping`
+- `trading_engine_status`: returns engine + risk + strategy snapshots
+- `trading_engine_control`: accepts `command` in `start | stop | status | ping | pause | resume | killswitch`
+- `trading_strategy_manage`: handles strategy list/enable/disable/upload/promote
+- `trading_risk_status`: returns hard safety-cage limits and runtime risk state
 
 Extension path:
 
@@ -96,6 +103,18 @@ Socket path configuration:
 
 - plugin config default: `/var/run/openclaw/trading.sock`
 - override via `TRADING_SOCKET_PATH` environment variable
+
+Daemon state configuration:
+
+- `TRADING_STATE_PATH`: strategy snapshot path (default `/var/run/openclaw/trading-state.json`)
+- `TRADING_CANDIDATE_TTL_MS`: optional candidate expiration TTL in milliseconds (default `0`, disabled)
+
+Command behavior notes:
+
+- `Control.Status` is still accepted for compatibility, but clients should prefer `Engine.Status`.
+- `Control.Stop` now means halted but not paused (`running=false`, `paused=false`).
+- `Engine.Pause` means safety pause (`running=false`, `paused=true`).
+- `reset_kill_switch` keeps the engine paused until explicit `resume`.
 
 ## Troubleshooting
 

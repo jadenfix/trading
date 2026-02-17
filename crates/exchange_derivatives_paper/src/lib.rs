@@ -19,18 +19,29 @@ struct AdapterState {
 
 #[derive(Debug)]
 pub struct DerivativesPaperAdapter {
+    mode: ExecutionMode,
     state: RwLock<AdapterState>,
 }
 
 impl Default for DerivativesPaperAdapter {
     fn default() -> Self {
-        Self {
-            state: RwLock::new(AdapterState::default()),
-        }
+        Self::new(ExecutionMode::Paper)
     }
 }
 
 impl DerivativesPaperAdapter {
+    pub fn new(mode: ExecutionMode) -> Self {
+        // This venue is intentionally paper-only even when runtime state is tampered.
+        let mode = match mode {
+            ExecutionMode::Paper => ExecutionMode::Paper,
+            ExecutionMode::Live => ExecutionMode::Paper,
+        };
+        Self {
+            mode,
+            state: RwLock::new(AdapterState::default()),
+        }
+    }
+
     fn validate_order(req: &OrderRequest) -> Result<(), ExchangeError> {
         if !matches!(
             req.instrument.market_type,
@@ -87,7 +98,7 @@ impl ExchangeAdapter for DerivativesPaperAdapter {
     }
 
     fn execution_mode(&self) -> ExecutionMode {
-        ExecutionMode::Paper
+        self.mode
     }
 
     async fn connect_market_data(&self) -> Result<(), ExchangeError> {
@@ -204,5 +215,22 @@ pub fn default_perp_instrument(symbol: &str) -> InstrumentId {
         strike: None,
         option_type: None,
         metadata: Default::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapter_clamps_live_mode_to_paper() {
+        let adapter = DerivativesPaperAdapter::new(ExecutionMode::Live);
+        assert_eq!(adapter.execution_mode(), ExecutionMode::Paper);
+    }
+
+    #[test]
+    fn adapter_default_mode_is_paper() {
+        let adapter = DerivativesPaperAdapter::default();
+        assert_eq!(adapter.execution_mode(), ExecutionMode::Paper);
     }
 }

@@ -416,6 +416,10 @@ fn default_adapters(
         .get(&mode_key("coinbase_spot", MarketType::Spot))
         .copied()
         .unwrap_or(ExecutionMode::Paper);
+    let derivatives_mode = execution_modes
+        .get(&mode_key("derivatives_paper", MarketType::Perpetual))
+        .copied()
+        .unwrap_or(ExecutionMode::Paper);
 
     [
         (
@@ -428,7 +432,7 @@ fn default_adapters(
         ),
         (
             "derivatives_paper".to_string(),
-            Arc::new(DerivativesPaperAdapter::default()) as Arc<dyn ExchangeAdapter>,
+            Arc::new(DerivativesPaperAdapter::new(derivatives_mode)) as Arc<dyn ExchangeAdapter>,
         ),
     ]
     .into_iter()
@@ -1480,9 +1484,14 @@ fn refresh_adapter_for_venue(state: &mut EngineState, venue_id: &str) {
             );
         }
         "derivatives_paper" => {
+            let mode = state
+                .execution_modes
+                .get(&mode_key("derivatives_paper", MarketType::Perpetual))
+                .copied()
+                .unwrap_or(ExecutionMode::Paper);
             state.adapters.insert(
                 "derivatives_paper".to_string(),
-                Arc::new(DerivativesPaperAdapter::default()),
+                Arc::new(DerivativesPaperAdapter::new(mode)),
             );
         }
         _ => {}

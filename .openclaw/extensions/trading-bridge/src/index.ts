@@ -923,7 +923,7 @@ export default function (api: any) {
       required: ["action"],
     },
     execute: async (arg1: unknown, arg2?: unknown): Promise<TradingHftResponse> => {
-      const rawInput = (isRecord(arg2) ? arg2 : isRecord(arg1) ? arg1 : {}) as TradingHftRequest;
+      const rawInput = (isRecord(arg2) ? arg2 : isRecord(arg1) ? arg1 : {}) as unknown as TradingHftRequest;
       const startedAt = Date.now();
       const action = rawInput.action;
       const intentId = asIntentId(rawInput.intent_id);

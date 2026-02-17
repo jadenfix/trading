@@ -69,7 +69,7 @@ jobs:
           node-version: 20
 
       - name: Install extension dependencies
-        run: npm install --no-fund --no-audit
+        run: npm ci --no-fund --no-audit
         working-directory: .openclaw/extensions/trading-bridge
 
       - name: Run extension tests

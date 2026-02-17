@@ -166,13 +166,9 @@ impl HardSafetyCage {
             };
         }
 
-        let current_strategy = snapshot
-            .strategy_canary_notional
-            .get(&request.strategy_id)
-            .copied()
-            .unwrap_or(0);
-        let projected_strategy =
-            current_strategy.saturating_add(request.requested_canary_notional_cents);
+        // When promoting, we are replacing the existing strategy configuration.
+        // Therefore, the new usage is simply the requested amount.
+        let projected_strategy = request.requested_canary_notional_cents;
 
         if projected_strategy > self.policy.max_strategy_canary_notional_cents {
             return RiskDecision::Deny {
@@ -229,5 +225,31 @@ mod tests {
                 reason: "promotion gates did not pass".to_string()
             }
         );
+    }
+    #[test]
+    fn allows_promotion_that_replaces_usage() {
+        let mut policy = HardSafetyPolicy::default();
+        policy.max_strategy_canary_notional_cents = 1000;
+        let cage = HardSafetyCage::new(policy);
+
+        let mut snapshot = RiskSnapshot::default();
+        snapshot
+            .strategy_canary_notional
+            .insert("strategy.a".to_string(), 800);
+
+        let req = PromotionRequest {
+            strategy_id: "strategy.a".to_string(),
+            code_hash: "hash".to_string(),
+            requested_canary_notional_cents: 900,
+            compile_passed: true,
+            replay_passed: true,
+            paper_passed: true,
+            latency_passed: true,
+            risk_passed: true,
+        };
+
+        // Should allow because 900 <= 1000 (replaces 800)
+        let result = cage.evaluate_promotion(&req, &snapshot);
+        assert_eq!(result, RiskDecision::Allow);
     }
 }

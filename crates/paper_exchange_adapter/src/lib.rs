@@ -107,6 +107,38 @@ impl PaperExchangeAdapter {
         entry.total += delta;
         entry.available += delta;
     }
+
+    fn update_position_after_fill(
+        position: &mut PositionSnapshot,
+        side: &OrderSide,
+        qty: f64,
+        fill_price: f64,
+    ) {
+        let signed_delta = if *side == OrderSide::Buy { qty } else { -qty };
+        let old_qty = position.qty;
+        let new_qty = old_qty + signed_delta;
+        let old_abs = old_qty.abs();
+        let delta_abs = signed_delta.abs();
+        let new_abs = new_qty.abs();
+        let epsilon = f64::EPSILON;
+
+        if old_abs <= epsilon {
+            position.avg_price = fill_price;
+        } else if old_qty.is_sign_positive() == signed_delta.is_sign_positive() {
+            if new_abs > epsilon {
+                position.avg_price =
+                    ((position.avg_price * old_abs) + (fill_price * delta_abs)) / new_abs;
+            } else {
+                position.avg_price = fill_price;
+            }
+        } else if delta_abs > old_abs + epsilon || new_abs <= epsilon {
+            // Trade crossed through zero (or flattened), so remaining basis is this fill.
+            position.avg_price = fill_price;
+        }
+
+        position.qty = if new_abs <= epsilon { 0.0 } else { new_qty };
+        position.mark_price = Some(fill_price);
+    }
 }
 
 impl ExchangeAdapter for PaperExchangeAdapter {
@@ -202,20 +234,7 @@ impl ExchangeAdapter for PaperExchangeAdapter {
                         unrealized_pnl: Some(0.0),
                     });
 
-            if req.side == OrderSide::Buy {
-                let old_qty = position.qty.max(0.0);
-                let new_qty = old_qty + req.qty;
-                position.avg_price = if new_qty > 0.0 {
-                    ((position.avg_price * old_qty) + (fill_price * req.qty)) / new_qty
-                } else {
-                    fill_price
-                };
-                position.qty += req.qty;
-            } else {
-                position.qty -= req.qty;
-            }
-
-            position.mark_price = Some(fill_price);
+            Self::update_position_after_fill(position, &req.side, req.qty, fill_price);
 
             Ok(OrderAck {
                 venue_order_id,
@@ -333,10 +352,13 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
-    async fn fills_spot_order_and_updates_balances() {
-        let adapter = PaperExchangeAdapter::new("paper");
-        let order = NormalizedOrderRequest {
+    fn spot_order(
+        client_order_id: &str,
+        side: OrderSide,
+        qty: f64,
+        limit_price: f64,
+    ) -> NormalizedOrderRequest {
+        NormalizedOrderRequest {
             venue: "paper".to_string(),
             symbol: "BTC-USD".to_string(),
             instrument: InstrumentRef {
@@ -352,17 +374,23 @@ mod tests {
                 contract_multiplier: Some(1.0),
             },
             strategy_id: "test.strategy".to_string(),
-            client_order_id: "client-1".to_string(),
-            intent_id: Some("intent-1".to_string()),
-            side: OrderSide::Buy,
+            client_order_id: client_order_id.to_string(),
+            intent_id: Some(format!("intent-{client_order_id}")),
+            side,
             order_type: OrderType::Limit,
-            qty: 1.0,
-            limit_price: Some(100.0),
+            qty,
+            limit_price: Some(limit_price),
             tif: Some(TimeInForce::Gtc),
             post_only: false,
             reduce_only: false,
-            requested_notional_cents: 10_000,
-        };
+            requested_notional_cents: (qty * limit_price * 100.0) as i64,
+        }
+    }
+
+    #[tokio::test]
+    async fn fills_spot_order_and_updates_balances() {
+        let adapter = PaperExchangeAdapter::new("paper");
+        let order = spot_order("client-1", OrderSide::Buy, 1.0, 100.0);
 
         let ack = adapter.place_order(order).await.expect("order should fill");
         assert!(ack.accepted);
@@ -370,5 +398,68 @@ mod tests {
 
         let balances = adapter.sync_balances().await.expect("balances");
         assert!(balances.iter().any(|b| b.asset == "BTC" && b.total > 0.0));
+    }
+
+    #[tokio::test]
+    async fn sell_reduction_keeps_existing_long_basis() {
+        let adapter = PaperExchangeAdapter::new("paper");
+        adapter
+            .place_order(spot_order("client-1", OrderSide::Buy, 2.0, 100.0))
+            .await
+            .expect("buy should fill");
+        adapter
+            .place_order(spot_order("client-2", OrderSide::Sell, 1.0, 120.0))
+            .await
+            .expect("sell should fill");
+
+        let positions = adapter.sync_positions().await.expect("positions");
+        let position = positions
+            .iter()
+            .find(|p| p.instrument.venue_symbol == "BTC-USD")
+            .expect("position should exist");
+        assert!((position.qty - 1.0).abs() < 1e-9);
+        assert!((position.avg_price - 100.05).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn side_flip_resets_basis_to_flip_fill_price() {
+        let adapter = PaperExchangeAdapter::new("paper");
+        adapter
+            .place_order(spot_order("client-1", OrderSide::Buy, 1.0, 100.0))
+            .await
+            .expect("buy should fill");
+        adapter
+            .place_order(spot_order("client-2", OrderSide::Sell, 2.0, 120.0))
+            .await
+            .expect("sell should fill");
+
+        let positions = adapter.sync_positions().await.expect("positions");
+        let position = positions
+            .iter()
+            .find(|p| p.instrument.venue_symbol == "BTC-USD")
+            .expect("position should exist");
+        assert!((position.qty + 1.0).abs() < 1e-9);
+        assert!((position.avg_price - 119.94).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn short_addition_recomputes_weighted_basis() {
+        let adapter = PaperExchangeAdapter::new("paper");
+        adapter
+            .place_order(spot_order("client-1", OrderSide::Sell, 1.0, 100.0))
+            .await
+            .expect("sell should fill");
+        adapter
+            .place_order(spot_order("client-2", OrderSide::Sell, 1.0, 110.0))
+            .await
+            .expect("sell should fill");
+
+        let positions = adapter.sync_positions().await.expect("positions");
+        let position = positions
+            .iter()
+            .find(|p| p.instrument.venue_symbol == "BTC-USD")
+            .expect("position should exist");
+        assert!((position.qty + 2.0).abs() < 1e-9);
+        assert!((position.avg_price - 104.9475).abs() < 1e-9);
     }
 }

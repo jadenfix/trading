@@ -1713,10 +1713,12 @@ async fn process_execution_request(
             }
 
             let cage = HardSafetyCage::new(safety_policy);
+            let venue_scope = &order.venue;
+            let asset_scope = &order.instrument.asset_class;
             let risk_decision = cage.evaluate_order_with_scope(
                 &order.strategy_id,
-                &order.venue,
-                &order.instrument.asset_class,
+                venue_scope,
+                asset_scope,
                 requested_notional_cents,
                 &risk_snapshot,
             );

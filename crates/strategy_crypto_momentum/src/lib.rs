@@ -1,12 +1,11 @@
 //! Crypto momentum/trend strategy plugin.
 
-use std::collections::BTreeMap;
-
-use exchange_core::NormalizedOrderRequest;
+use exchange_core::{
+    AssetClass, InstrumentRef, InstrumentType, NormalizedOrderRequest, OrderSide, OrderType,
+};
 use strategy_core::{
     MarketRegime, RegimeContext, SignalIntent, StrategyError, StrategyFamily, StrategyPlugin,
 };
-use trading_domain::{AssetClass, InstrumentId, MarketType, OrderSide, OrderType};
 
 #[derive(Debug, Default)]
 pub struct CryptoMomentumStrategy;
@@ -38,35 +37,46 @@ impl StrategyPlugin for CryptoMomentumStrategy {
         } else {
             OrderSide::Sell
         };
+        let reduce_only = side == OrderSide::Sell;
 
-        let market_type = if ctx.venue.eq_ignore_ascii_case("derivatives_paper") {
-            MarketType::Perpetual
+        let instrument_type = if ctx.venue.eq_ignore_ascii_case("derivatives_paper") {
+            InstrumentType::Perpetual
         } else {
-            MarketType::Spot
+            InstrumentType::Spot
         };
 
+        let (base, quote) = ctx
+            .symbol
+            .split_once('-')
+            .map(|(b, q)| (Some(b.to_string()), Some(q.to_string())))
+            .unwrap_or_else(|| (Some(ctx.symbol.clone()), Some("USD".to_string())));
+
         let order = NormalizedOrderRequest {
-            venue_id: ctx.venue.clone(),
-            strategy_id: self.id().to_string(),
-            client_order_id: format!("mom-{}", ctx.ts_ms),
-            instrument: InstrumentId {
-                venue_id: ctx.venue.clone(),
-                symbol: ctx.symbol.clone(),
+            venue: ctx.venue.clone(),
+            symbol: ctx.symbol.clone(),
+            instrument: InstrumentRef {
+                venue: ctx.venue.clone(),
+                venue_symbol: ctx.symbol.clone(),
                 asset_class: AssetClass::Crypto,
-                market_type,
+                instrument_type,
+                base,
+                quote,
                 expiry_ts_ms: None,
                 strike: None,
-                option_type: None,
-                metadata: BTreeMap::new(),
+                option_right: None,
+                contract_multiplier: Some(1.0),
             },
+            strategy_id: self.id().to_string(),
+            client_order_id: format!("mom-{}", ctx.ts_ms),
+            intent_id: Some(format!("{}-{}", self.id(), ctx.ts_ms)),
             side,
             order_type: OrderType::Market,
-            quantity: 0.001,
+            qty: 0.001,
             limit_price: None,
             tif: None,
             post_only: false,
-            reduce_only: side == OrderSide::Sell,
-            metadata: BTreeMap::new(),
+            reduce_only,
+            requested_notional_cents: 200,
         };
 
         Ok(Some(SignalIntent {

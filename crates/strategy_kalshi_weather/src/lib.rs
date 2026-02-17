@@ -1,12 +1,12 @@
 //! Kalshi weather strategy plugin.
 
-use std::collections::BTreeMap;
-
-use exchange_core::NormalizedOrderRequest;
+use exchange_core::{
+    AssetClass, InstrumentRef, InstrumentType, NormalizedOrderRequest, OrderSide, OrderType,
+    TimeInForce,
+};
 use strategy_core::{
     MarketRegime, RegimeContext, SignalIntent, StrategyError, StrategyFamily, StrategyPlugin,
 };
-use trading_domain::{AssetClass, InstrumentId, MarketType, OrderSide, OrderType, TimeInForce};
 
 #[derive(Debug, Default)]
 pub struct KalshiWeatherStrategy;
@@ -36,27 +36,31 @@ impl StrategyPlugin for KalshiWeatherStrategy {
         }
 
         let order = NormalizedOrderRequest {
-            venue_id: "kalshi".to_string(),
-            strategy_id: self.id().to_string(),
-            client_order_id: format!("weather-{}", ctx.ts_ms),
-            instrument: InstrumentId {
-                venue_id: "kalshi".to_string(),
-                symbol: ctx.symbol.clone(),
+            venue: "kalshi".to_string(),
+            symbol: ctx.symbol.clone(),
+            instrument: InstrumentRef {
+                venue: "kalshi".to_string(),
+                venue_symbol: ctx.symbol.clone(),
                 asset_class: AssetClass::Prediction,
-                market_type: MarketType::Binary,
+                instrument_type: InstrumentType::BinaryOption,
+                base: None,
+                quote: Some("USD".to_string()),
                 expiry_ts_ms: None,
                 strike: None,
-                option_type: None,
-                metadata: BTreeMap::new(),
+                option_right: None,
+                contract_multiplier: Some(1.0),
             },
+            strategy_id: self.id().to_string(),
+            client_order_id: format!("weather-{}", ctx.ts_ms),
+            intent_id: Some(format!("{}-{}", self.id(), ctx.ts_ms)),
             side: OrderSide::Buy,
             order_type: OrderType::Limit,
-            quantity: 1.0,
+            qty: 1.0,
             limit_price: Some(0.45),
             tif: Some(TimeInForce::Ioc),
             post_only: false,
             reduce_only: false,
-            metadata: BTreeMap::new(),
+            requested_notional_cents: 150,
         };
 
         Ok(Some(SignalIntent {

@@ -1,23 +1,24 @@
-//! Coinbase Advanced Trade (spot) adapter.
+//! Coinbase spot adapter used by the legacy workspace members.
 //!
-//! The implementation is intentionally conservative and stateful so runtime control
-//! flows can be validated in both paper and live modes.
+//! This crate now speaks the new `exchange_core` async-future trait surface.
 
 use std::collections::HashMap;
 
-use async_trait::async_trait;
-use exchange_core::{ExchangeAdapter, ExchangeError};
-use tokio::sync::RwLock;
-use trading_domain::{
-    AssetClass, BalanceSnapshot, ExecutionMode, InstrumentId, MarketType, OrderAck, OrderRequest,
-    OrderSide, OrderStatus, OrderSummary, PositionSnapshot, VenueCapability, VenueHealth,
+use exchange_core::{
+    AssetClass, BalanceSnapshot, ExchangeAdapter, ExchangeError, ExchangeHealth,
+    ExchangeResultFuture, ExchangeValueFuture, FillReport, InstrumentRef, InstrumentType,
+    NormalizedOrderRequest, OpenOrderSnapshot, OrderAck, OrderSide, OrderSnapshot, OrderStatus,
+    PositionSnapshot,
 };
+use tokio::sync::RwLock;
+use trading_domain::ExecutionMode;
 use uuid::Uuid;
 
 #[derive(Debug, Default)]
 struct AdapterState {
     positions: HashMap<String, PositionSnapshot>,
-    orders: HashMap<String, OrderSummary>,
+    orders: HashMap<String, OrderSnapshot>,
+    fills: Vec<FillReport>,
 }
 
 #[derive(Debug)]
@@ -34,174 +35,259 @@ impl CoinbaseSpotAdapter {
         }
     }
 
-    fn validate_order(req: &OrderRequest) -> Result<(), ExchangeError> {
-        if req.instrument.market_type != MarketType::Spot
+    fn now_ms() -> i64 {
+        chrono::Utc::now().timestamp_millis()
+    }
+
+    fn validate_order(req: &NormalizedOrderRequest) -> Result<(), ExchangeError> {
+        if req.instrument.instrument_type != InstrumentType::Spot
             || req.instrument.asset_class != AssetClass::Crypto
         {
-            return Err(ExchangeError {
-                code: "unsupported_market_type".to_string(),
-                message: "Coinbase spot adapter only accepts crypto spot instruments".to_string(),
-                retriable: false,
-            });
+            return Err(ExchangeError::new(
+                "unsupported_instrument",
+                "coinbase spot adapter only accepts crypto spot instruments",
+                false,
+            ));
         }
-        if req.quantity <= 0.0 {
-            return Err(ExchangeError {
-                code: "invalid_quantity".to_string(),
-                message: "order quantity must be > 0".to_string(),
-                retriable: false,
-            });
+
+        if req.qty <= 0.0 {
+            return Err(ExchangeError::new(
+                "invalid_quantity",
+                "order qty must be > 0",
+                false,
+            ));
         }
+
         Ok(())
+    }
+
+    fn signed_qty(side: &OrderSide, qty: f64) -> f64 {
+        match side {
+            OrderSide::Buy => qty,
+            OrderSide::Sell => -qty,
+        }
+    }
+
+    fn fill_price(req: &NormalizedOrderRequest) -> f64 {
+        req.limit_price.unwrap_or(0.0)
+    }
+
+    fn mode_is_live(&self) -> bool {
+        matches!(self.mode, ExecutionMode::Live)
     }
 }
 
-#[async_trait]
 impl ExchangeAdapter for CoinbaseSpotAdapter {
     fn venue(&self) -> &'static str {
         "coinbase_spot"
     }
 
-    fn capabilities(&self) -> Vec<VenueCapability> {
-        vec![VenueCapability {
-            market_type: MarketType::Spot,
-            supports_live: true,
-            supports_paper: true,
-            supports_post_only: true,
-            supports_reduce_only: false,
-        }]
+    fn connect_market_data(&self) -> ExchangeResultFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
     }
 
-    fn execution_mode(&self) -> ExecutionMode {
-        self.mode
-    }
+    fn place_order(&self, req: NormalizedOrderRequest) -> ExchangeResultFuture<'_, OrderAck> {
+        Box::pin(async move {
+            Self::validate_order(&req)?;
 
-    async fn connect_market_data(&self) -> Result<(), ExchangeError> {
-        Ok(())
-    }
-
-    async fn place_order(&self, req: OrderRequest) -> Result<OrderAck, ExchangeError> {
-        Self::validate_order(&req)?;
-
-        let now = chrono::Utc::now().timestamp_millis();
-        let venue_order_id = format!("cb-{}", Uuid::new_v4());
-        let status = match self.mode {
-            ExecutionMode::Paper => OrderStatus::Filled,
-            ExecutionMode::Live => OrderStatus::Accepted,
-        };
-
-        let summary = OrderSummary {
-            venue_order_id: venue_order_id.clone(),
-            client_order_id: req.client_order_id.clone(),
-            strategy_id: req.strategy_id.clone(),
-            venue_id: req.venue_id.clone(),
-            instrument: req.instrument.clone(),
-            side: req.side,
-            order_type: req.order_type,
-            quantity: req.quantity,
-            filled_quantity: if status == OrderStatus::Filled {
-                req.quantity
+            let now = Self::now_ms();
+            let venue_order_id = format!("cb-{}", Uuid::new_v4());
+            let status = if self.mode_is_live() {
+                OrderStatus::New
+            } else {
+                OrderStatus::Filled
+            };
+            let filled_qty = if status == OrderStatus::Filled {
+                req.qty
             } else {
                 0.0
-            },
-            avg_fill_price: req.limit_price,
-            status,
-            created_at_ms: now,
-            updated_at_ms: now,
-            message: None,
-        };
-
-        let mut state = self.state.write().await;
-        if status == OrderStatus::Filled {
-            let key = req.instrument.key();
-            let signed = match req.side {
-                OrderSide::Buy => req.quantity,
-                OrderSide::Sell => -req.quantity,
             };
-            let entry = state
-                .positions
-                .entry(key)
-                .or_insert_with(|| PositionSnapshot {
-                    venue_id: req.venue_id.clone(),
-                    instrument: req.instrument.clone(),
-                    quantity: 0.0,
-                    avg_price: req.limit_price.unwrap_or(0.0),
-                    mark_price: req.limit_price,
-                    unrealized_pnl: Some(0.0),
-                });
-            entry.quantity += signed;
-            if let Some(price) = req.limit_price {
-                entry.avg_price = price;
-                entry.mark_price = Some(price);
-            }
-        }
-        state.orders.insert(venue_order_id.clone(), summary);
+            let avg_fill_price = if status == OrderStatus::Filled {
+                Some(Self::fill_price(&req))
+            } else {
+                None
+            };
 
-        Ok(OrderAck {
-            venue_order_id,
-            accepted: true,
-            status,
-            reason: None,
+            let snapshot = OrderSnapshot {
+                venue: req.venue.clone(),
+                venue_order_id: venue_order_id.clone(),
+                client_order_id: req.client_order_id.clone(),
+                strategy_id: req.strategy_id.clone(),
+                instrument: req.instrument.clone(),
+                side: req.side.clone(),
+                order_type: req.order_type.clone(),
+                status: status.clone(),
+                qty: req.qty,
+                filled_qty,
+                limit_price: req.limit_price,
+                avg_fill_price,
+                created_at_ms: now,
+                updated_at_ms: now,
+                simulated: !self.mode_is_live(),
+            };
+
+            let mut state = self.state.write().await;
+            if status == OrderStatus::Filled {
+                let key = format!("{}:{}", req.instrument.venue, req.instrument.venue_symbol);
+                let fill_price = Self::fill_price(&req);
+                let entry = state
+                    .positions
+                    .entry(key)
+                    .or_insert_with(|| PositionSnapshot {
+                        venue: req.venue.clone(),
+                        instrument: req.instrument.clone(),
+                        qty: 0.0,
+                        avg_price: fill_price,
+                        mark_price: Some(fill_price),
+                        unrealized_pnl: Some(0.0),
+                    });
+                entry.qty += Self::signed_qty(&req.side, req.qty);
+                entry.avg_price = fill_price;
+                entry.mark_price = Some(fill_price);
+
+                state.fills.push(FillReport {
+                    venue: req.venue.clone(),
+                    venue_fill_id: format!("cb-fill-{}", Uuid::new_v4()),
+                    venue_order_id: venue_order_id.clone(),
+                    client_order_id: req.client_order_id.clone(),
+                    strategy_id: req.strategy_id.clone(),
+                    instrument: req.instrument.clone(),
+                    side: req.side.clone(),
+                    qty: req.qty,
+                    price: fill_price,
+                    fee: 0.0,
+                    fee_asset: req.instrument.quote.clone(),
+                    liquidity: Some("taker".to_string()),
+                    simulated: true,
+                    ts_ms: now,
+                });
+            }
+            state.orders.insert(venue_order_id.clone(), snapshot);
+
+            Ok(OrderAck {
+                venue_order_id,
+                client_order_id: req.client_order_id,
+                accepted: true,
+                status,
+                filled_qty,
+                avg_fill_price,
+                simulated: !self.mode_is_live(),
+                reason: None,
+                ts_ms: now,
+            })
         })
     }
 
-    async fn cancel_order(&self, venue_order_id: &str) -> Result<(), ExchangeError> {
-        let mut state = self.state.write().await;
-        let Some(order) = state.orders.get_mut(venue_order_id) else {
-            return Err(ExchangeError {
-                code: "order_not_found".to_string(),
-                message: format!("unknown order id: {venue_order_id}"),
-                retriable: false,
-            });
-        };
-        order.status = OrderStatus::Canceled;
-        order.updated_at_ms = chrono::Utc::now().timestamp_millis();
-        order.message = Some("canceled by operator".to_string());
-        Ok(())
+    fn cancel_order(&self, venue_order_id: &str) -> ExchangeResultFuture<'_, ()> {
+        let venue_order_id = venue_order_id.to_string();
+        Box::pin(async move {
+            let mut state = self.state.write().await;
+            let order = state.orders.get_mut(&venue_order_id).ok_or_else(|| {
+                ExchangeError::new(
+                    "order_not_found",
+                    format!("unknown order id: {venue_order_id}"),
+                    false,
+                )
+            })?;
+
+            order.status = OrderStatus::Canceled;
+            order.updated_at_ms = Self::now_ms();
+            Ok(())
+        })
     }
 
-    async fn sync_positions(&self) -> Result<Vec<PositionSnapshot>, ExchangeError> {
-        let state = self.state.read().await;
-        Ok(state.positions.values().cloned().collect())
+    fn get_order(&self, venue_order_id: &str) -> ExchangeResultFuture<'_, Option<OrderSnapshot>> {
+        let venue_order_id = venue_order_id.to_string();
+        Box::pin(async move { Ok(self.state.read().await.orders.get(&venue_order_id).cloned()) })
     }
 
-    async fn sync_balances(&self) -> Result<Vec<BalanceSnapshot>, ExchangeError> {
-        let (total, available) = match self.mode {
-            ExecutionMode::Paper => (50_000.0, 50_000.0),
-            ExecutionMode::Live => (0.0, 0.0),
-        };
-        Ok(vec![BalanceSnapshot {
-            venue_id: "coinbase_spot".to_string(),
-            asset: "USD".to_string(),
-            total,
-            available,
-        }])
+    fn open_orders(&self) -> ExchangeResultFuture<'_, Vec<OpenOrderSnapshot>> {
+        Box::pin(async move {
+            let state = self.state.read().await;
+            Ok(state
+                .orders
+                .values()
+                .filter(|order| matches!(order.status, OrderStatus::New | OrderStatus::PartiallyFilled))
+                .cloned()
+                .map(|order| OpenOrderSnapshot { order })
+                .collect())
+        })
     }
 
-    async fn list_orders(&self) -> Result<Vec<OrderSummary>, ExchangeError> {
-        let state = self.state.read().await;
-        Ok(state.orders.values().cloned().collect())
+    fn fills_since(
+        &self,
+        since_ts_ms: i64,
+        limit: usize,
+    ) -> ExchangeResultFuture<'_, Vec<FillReport>> {
+        Box::pin(async move {
+            let state = self.state.read().await;
+            let mut fills: Vec<FillReport> = state
+                .fills
+                .iter()
+                .filter(|fill| fill.ts_ms >= since_ts_ms)
+                .cloned()
+                .collect();
+            fills.sort_by_key(|fill| fill.ts_ms);
+            if fills.len() > limit {
+                fills = fills[fills.len().saturating_sub(limit)..].to_vec();
+            }
+            Ok(fills)
+        })
     }
 
-    fn health(&self) -> VenueHealth {
-        VenueHealth {
-            venue_id: "coinbase_spot".to_string(),
-            healthy: true,
-            connected_market_data: true,
-            connected_trading: true,
-            message: Some("adapter active".to_string()),
-        }
+    fn sync_positions(&self) -> ExchangeResultFuture<'_, Vec<PositionSnapshot>> {
+        Box::pin(async move {
+            let state = self.state.read().await;
+            Ok(state.positions.values().cloned().collect())
+        })
+    }
+
+    fn sync_balances(&self) -> ExchangeResultFuture<'_, Vec<BalanceSnapshot>> {
+        Box::pin(async move {
+            let (total, available) = if self.mode_is_live() {
+                (0.0, 0.0)
+            } else {
+                (50_000.0, 50_000.0)
+            };
+
+            Ok(vec![BalanceSnapshot {
+                venue: self.venue().to_string(),
+                asset: "USD".to_string(),
+                total,
+                available,
+            }])
+        })
+    }
+
+    fn health(&self) -> ExchangeValueFuture<'_, ExchangeHealth> {
+        Box::pin(async move {
+            ExchangeHealth {
+                venue: self.venue().to_string(),
+                healthy: true,
+                connected_market_data: true,
+                connected_trading: true,
+                message: Some("adapter active".to_string()),
+            }
+        })
     }
 }
 
-pub fn default_spot_instrument(symbol: &str) -> InstrumentId {
-    InstrumentId {
-        venue_id: "coinbase_spot".to_string(),
-        symbol: symbol.to_string(),
+pub fn default_spot_instrument(symbol: &str) -> InstrumentRef {
+    let (base, quote) = symbol
+        .split_once('-')
+        .map(|(b, q)| (Some(b.to_string()), Some(q.to_string())))
+        .unwrap_or_else(|| (Some(symbol.to_string()), Some("USD".to_string())));
+
+    InstrumentRef {
+        venue: "coinbase_spot".to_string(),
+        venue_symbol: symbol.to_string(),
         asset_class: AssetClass::Crypto,
-        market_type: MarketType::Spot,
+        instrument_type: InstrumentType::Spot,
+        base,
+        quote,
         expiry_ts_ms: None,
         strike: None,
-        option_type: None,
-        metadata: Default::default(),
+        option_right: None,
+        contract_multiplier: Some(1.0),
     }
 }

@@ -23,6 +23,8 @@ KNOWN_COMMANDS=(
   clawdbot-trading-logs
   clawdbot-trading-ping
   clawdbot-trading-status
+  clawdbot-trading-capabilities
+  clawdbot-trading-doctor
   clawdbot-trading-start
   clawdbot-trading-stop
   clawdbot-trading-venue-list
@@ -48,12 +50,12 @@ Commands:
   ./trading-cli temporal [up|down|status|logs|ui|list|describe|show]          # temporal debugger/server orchestrator
   ./trading-cli observability [up|down|status|logs|ui] [service]              # observability stack orchestrator
   ./trading-cli sports-agent [go|up|down|status|logs|approve|execute|cancel|hard-cancel|stop-service] [--mode <hitl|auto_ultra_strict>] [--dry-run] <workflow_id_or_trace_id>
-  ./trading-cli clawdbot-trading [up|down|ps|logs|ping|status|start|stop|venue-list|venue-status|venue-enable|venue-disable|portfolio-balances|portfolio-positions|order-list|order-cancel|order-submit|execution-mode-get|execution-mode-set] [args...]
+  ./trading-cli clawdbot-trading [up|down|ps|logs|ping|status|capabilities|doctor|start|stop|venue-list|venue-status|venue-enable|venue-disable|portfolio-balances|portfolio-positions|order-list|order-cancel|order-submit|execution-mode-get|execution-mode-set] [args...]
                                                                          # OpenClaw + Rust trading bridge controls (up checks required service health)
   ./trading-cli clawdbot-trading-up|clawdbot-trading-down|clawdbot-trading-ps
                                                                          # convenience aliases for compose lifecycle
-  ./trading-cli clawdbot-trading-ping|clawdbot-trading-status|clawdbot-trading-start|clawdbot-trading-stop
-                                                                         # convenience aliases for tradingctl
+  ./trading-cli clawdbot-trading-ping|clawdbot-trading-status|clawdbot-trading-capabilities|clawdbot-trading-doctor|clawdbot-trading-start|clawdbot-trading-stop
+                                                                         # convenience aliases for bridge health/control
   ./trading-cli clawdbot-trading-venue-list|clawdbot-trading-portfolio-balances|clawdbot-trading-portfolio-positions
                                                                          # convenience aliases for additive multi-asset controls
                                                                          # note: openclaw-cli is an on-demand helper container and may be Exited
@@ -96,6 +98,8 @@ Examples:
   ./trading-cli clawdbot-trading up
   ./trading-cli clawdbot-trading ping
   ./trading-cli clawdbot-trading status
+  ./trading-cli clawdbot-trading capabilities
+  ./trading-cli clawdbot-trading doctor
   ./trading-cli clawdbot-trading start
   ./trading-cli clawdbot-trading stop
   ./trading-cli clawdbot-trading venue-list
@@ -501,6 +505,190 @@ clawdbot_trading_wait_for_required_services() {
   done
 }
 
+dotenv_value() {
+  local key="$1"
+  local default_value="${2:-}"
+
+  local env_value="${!key:-}"
+  if [[ -n "$env_value" ]]; then
+    echo "$env_value"
+    return
+  fi
+
+  local env_file="$ROOT_DIR/.env"
+  if [[ -f "$env_file" ]]; then
+    local line
+    line="$(grep -E "^${key}=" "$env_file" | tail -n 1 || true)"
+    if [[ -n "$line" ]]; then
+      local value="${line#*=}"
+      value="${value%$'\r'}"
+      value="${value%\"}"
+      value="${value#\"}"
+      value="${value%\'}"
+      value="${value#\'}"
+      echo "$value"
+      return
+    fi
+  fi
+
+  echo "$default_value"
+}
+
+gateway_trading_hft_health_ok() {
+  local response="$1"
+
+  local jq_bin
+  jq_bin="$(resolve_cmd jq || true)"
+  if [[ -n "$jq_bin" ]]; then
+    if printf '%s' "$response" | "$jq_bin" -e '.ok == true and (.result | type == "object") and .result.ok == true' >/dev/null 2>&1; then
+      return 0
+    fi
+    return 1
+  fi
+
+  local node_bin
+  node_bin="$(resolve_cmd node || true)"
+  if [[ -n "$node_bin" ]]; then
+    if printf '%s' "$response" | "$node_bin" -e '
+let data = "";
+process.stdin.on("data", (chunk) => (data += chunk));
+process.stdin.on("end", () => {
+  try {
+    const parsed = JSON.parse(data);
+    process.exit(parsed?.ok === true && parsed?.result?.ok === true ? 0 : 1);
+  } catch {
+    process.exit(1);
+  }
+});
+' >/dev/null 2>&1; then
+      return 0
+    fi
+    return 1
+  fi
+
+  local compact
+  compact="$(printf '%s' "$response" | tr -d '[:space:]')"
+  [[ "$compact" == *'"ok":true'* && "$compact" == *'"result":{'* && "$compact" == *'"result":{"ok":true'* ]]
+}
+
+clawdbot_trading_doctor() {
+  local docker_bin="$1"
+  local compose_file="$2"
+  local failures=0
+
+  local pass="PASS"
+  local fail="FAIL"
+
+  echo "Running clawdbot trading doctor..."
+
+  local daemon_state gateway_state
+  daemon_state="$(clawdbot_trading_service_state "$docker_bin" "$compose_file" "trading-daemon" || true)"
+  gateway_state="$(clawdbot_trading_service_state "$docker_bin" "$compose_file" "openclaw-gateway" || true)"
+
+  if [[ "$daemon_state" == "running" ]]; then
+    echo "[$pass] trading-daemon service running"
+  else
+    echo "[$fail] trading-daemon service not running (state=$daemon_state)" >&2
+    failures=$((failures + 1))
+  fi
+
+  if [[ "$gateway_state" == "running" ]]; then
+    echo "[$pass] openclaw-gateway service running"
+  else
+    echo "[$fail] openclaw-gateway service not running (state=$gateway_state)" >&2
+    failures=$((failures + 1))
+  fi
+
+  if [[ "$daemon_state" == "running" ]]; then
+    local capabilities_output
+    if capabilities_output="$("$docker_bin" compose -f "$compose_file" --project-directory "$ROOT_DIR" exec -T trading-daemon tradingctl capabilities 2>&1)"; then
+      if echo "$capabilities_output" | grep -q '"protocol_version"'; then
+        echo "[$pass] daemon exposes protocol_version in capabilities"
+      else
+        echo "[$fail] daemon capabilities missing protocol_version" >&2
+        failures=$((failures + 1))
+      fi
+
+      if echo "$capabilities_output" | grep -q '"status_schema_version"'; then
+        echo "[$pass] daemon exposes status_schema_version in capabilities"
+      else
+        echo "[$fail] daemon capabilities missing status_schema_version" >&2
+        failures=$((failures + 1))
+      fi
+
+      if echo "$capabilities_output" | grep -q 'Control.Capabilities'; then
+        echo "[$pass] daemon advertises Control.Capabilities command support"
+      else
+        echo "[$fail] daemon command surface does not include Control.Capabilities" >&2
+        failures=$((failures + 1))
+      fi
+    else
+      echo "[$fail] tradingctl capabilities command failed" >&2
+      echo "$capabilities_output" >&2
+      failures=$((failures + 1))
+    fi
+
+    local status_output
+    if status_output="$("$docker_bin" compose -f "$compose_file" --project-directory "$ROOT_DIR" exec -T trading-daemon tradingctl status 2>&1)"; then
+      if echo "$status_output" | grep -q '"status_schema_version"'; then
+        echo "[$pass] status payload includes status_schema_version"
+      else
+        echo "[$fail] status payload missing status_schema_version (schema drift)" >&2
+        failures=$((failures + 1))
+      fi
+    else
+      echo "[$fail] tradingctl status command failed" >&2
+      echo "$status_output" >&2
+      failures=$((failures + 1))
+    fi
+  fi
+
+  if [[ "$gateway_state" == "running" ]]; then
+    local curl_bin
+    curl_bin="$(resolve_cmd curl || true)"
+    if [[ -z "$curl_bin" ]]; then
+      echo "[$fail] curl not found; cannot verify gateway trading_hft tool availability" >&2
+      failures=$((failures + 1))
+    else
+      local gateway_port gateway_token gateway_response
+      gateway_port="$(dotenv_value OPENCLAW_GATEWAY_PORT 18789)"
+      gateway_token="$(dotenv_value OPENCLAW_GATEWAY_TOKEN "")"
+
+      if [[ -z "$gateway_token" ]]; then
+        echo "[$fail] OPENCLAW_GATEWAY_TOKEN is empty; cannot call /tools/invoke" >&2
+        failures=$((failures + 1))
+      else
+        if gateway_response="$("$curl_bin" -fsS -X POST "http://127.0.0.1:${gateway_port}/tools/invoke" \
+          -H "content-type: application/json" \
+          -H "authorization: Bearer ${gateway_token}" \
+          --data '{"tool":"trading_hft","action":"json","args":{"action":"health"}}' 2>&1)"; then
+          if echo "$gateway_response" | grep -q 'Tool not available: trading_hft'; then
+            echo "[$fail] trading_hft tool is not registered in gateway runtime" >&2
+            failures=$((failures + 1))
+          elif gateway_trading_hft_health_ok "$gateway_response"; then
+            echo "[$pass] trading_hft tool is available and returns healthy result via gateway /tools/invoke"
+          else
+            echo "[$fail] gateway response did not confirm trading_hft readiness" >&2
+            echo "$gateway_response" >&2
+            failures=$((failures + 1))
+          fi
+        else
+          echo "[$fail] failed to call gateway /tools/invoke trading_hft health" >&2
+          echo "$gateway_response" >&2
+          failures=$((failures + 1))
+        fi
+      fi
+    fi
+  fi
+
+  if (( failures > 0 )); then
+    echo "Doctor completed with $failures failure(s)." >&2
+    return 1
+  fi
+
+  echo "Doctor completed successfully."
+}
+
 run_clawdbot_trading() {
   local action="${1:-status}"
   shift || true
@@ -553,7 +741,15 @@ run_clawdbot_trading() {
       esac
       "$docker_bin" compose -f "$compose_file" --project-directory "$ROOT_DIR" logs -f "$service"
       ;;
-    ping|status|start|stop)
+    doctor)
+      if [[ $# -gt 0 ]]; then
+        echo "Too many arguments for clawdbot-trading doctor command" >&2
+        echo "Use: ./trading-cli clawdbot-trading doctor" >&2
+        exit 1
+      fi
+      clawdbot_trading_doctor "$docker_bin" "$compose_file"
+      ;;
+    ping|status|capabilities|start|stop)
       if [[ $# -gt 0 ]]; then
         echo "Too many arguments for clawdbot-trading $action command" >&2
         echo "Use: ./trading-cli clawdbot-trading $action" >&2
@@ -566,7 +762,7 @@ run_clawdbot_trading() {
       ;;
     *)
       echo "Unknown clawdbot-trading action: $action" >&2
-      echo "Use: ./trading-cli clawdbot-trading [up|down|ps|logs|ping|status|start|stop|venue-list|venue-status|venue-enable|venue-disable|portfolio-balances|portfolio-positions|order-list|order-cancel|order-submit|execution-mode-get|execution-mode-set]" >&2
+      echo "Use: ./trading-cli clawdbot-trading [up|down|ps|logs|ping|status|capabilities|doctor|start|stop|venue-list|venue-status|venue-enable|venue-disable|portfolio-balances|portfolio-positions|order-list|order-cancel|order-submit|execution-mode-get|execution-mode-set]" >&2
       exit 1
       ;;
   esac
@@ -1432,6 +1628,12 @@ main() {
       ;;
     clawdbot-trading-status)
       run_clawdbot_trading status "$@"
+      ;;
+    clawdbot-trading-capabilities)
+      run_clawdbot_trading capabilities "$@"
+      ;;
+    clawdbot-trading-doctor)
+      run_clawdbot_trading doctor "$@"
       ;;
     clawdbot-trading-start)
       run_clawdbot_trading start "$@"

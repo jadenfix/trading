@@ -23,7 +23,7 @@ This repo now includes a low-latency Rust bridge for OpenClaw trade control over
 - `crates/trading_daemon`: Rust daemon exposing the UDS control endpoint (`/var/run/openclaw/trading.sock`)
 - `crates/trading_protocol`: shared framing + envelope protocol
 - `crates/tradingctl`: CLI client for ping/start/stop/status checks
-- `.openclaw/extensions/trading-bridge`: OpenClaw tool bridge exposing `trading_status` and `trading_control`
+- `.openclaw/extensions/trading-bridge`: OpenClaw tool bridge exposing the unified `trading_hft` control-plane tool
 
 Run it with:
 
@@ -159,6 +159,7 @@ bash ./trading-cli llm-workflow [go|up|down|status|logs]
 bash ./trading-cli temporal [up|down|status|logs|ui|list|describe|show]
 bash ./trading-cli observability [up|down|status|logs|ui] [trace-api|temporal-broker|temporal]
 bash ./trading-cli sports-agent [go|up|down|status|logs|approve|execute|cancel|hard-cancel|stop-service] [--mode <hitl|auto_ultra_strict>] [--dry-run] [trace_id]
+bash ./trading-cli clawdbot-trading [up|down|ps|logs|ping|status|capabilities|doctor|start|stop]
 bash ./trading-cli dev
 bash ./trading-cli status
 bash ./trading-cli down

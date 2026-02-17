@@ -21,10 +21,11 @@ use tokio::sync::Mutex;
 use tokio_util::codec::Framed;
 use tracing::{error, info, warn};
 use trading_protocol::{
-    create_codec, CandidatePromotePayload, CandidateUploadPayload, ControlCommand, EngineCommand,
-    EngineStatePayload, Envelope, Event, RequestKind, RiskCommand, RiskLimitsPayload,
-    RiskOverridePayload, RiskStatePayload, StrategyCommand, StrategySummaryPayload,
-    DEFAULT_SOCKET_PATH,
+    create_codec, CandidatePromotePayload, CandidateUploadPayload, CapabilitiesPayload,
+    ControlCommand, DaemonBuildPayload, EngineCommand, EngineStatePayload, Envelope, Event,
+    RequestKind, RiskCommand, RiskLimitsPayload, RiskOverridePayload, RiskStatePayload,
+    StrategyCommand, StrategySummaryPayload, DEFAULT_SOCKET_PATH, PROTOCOL_VERSION,
+    STATUS_SCHEMA_VERSION,
 };
 
 const DEFAULT_LOCK_PATH: &str = "/var/run/openclaw/trading.lock";
@@ -644,6 +645,13 @@ async fn process_control_request(
             let state = state.lock().await;
             status_response(request, &state)
         }
+        ControlCommand::Capabilities => Envelope::response_to(
+            request,
+            json!({
+                "ok": true,
+                "capabilities": capabilities_payload(),
+            }),
+        ),
         ControlCommand::Start => {
             let mut state = state.lock().await;
             if state.kill_switch_engaged {
@@ -1060,12 +1068,53 @@ fn engine_health_event(state: &EngineState) -> Event {
     }
 }
 
+fn daemon_build_payload() -> DaemonBuildPayload {
+    DaemonBuildPayload {
+        name: env!("CARGO_PKG_NAME").to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        git_sha: option_env!("TRADING_DAEMON_GIT_SHA").map(str::to_string),
+    }
+}
+
+fn command_kinds_supported() -> Vec<String> {
+    vec![
+        ControlCommand::Start.as_kind().to_string(),
+        ControlCommand::Stop.as_kind().to_string(),
+        ControlCommand::Status.as_kind().to_string(),
+        ControlCommand::Ping.as_kind().to_string(),
+        ControlCommand::Capabilities.as_kind().to_string(),
+        EngineCommand::Status.as_kind().to_string(),
+        EngineCommand::Pause.as_kind().to_string(),
+        EngineCommand::Resume.as_kind().to_string(),
+        EngineCommand::KillSwitch.as_kind().to_string(),
+        StrategyCommand::List.as_kind().to_string(),
+        StrategyCommand::Enable.as_kind().to_string(),
+        StrategyCommand::Disable.as_kind().to_string(),
+        StrategyCommand::UploadCandidate.as_kind().to_string(),
+        StrategyCommand::PromoteCandidate.as_kind().to_string(),
+        RiskCommand::Status.as_kind().to_string(),
+        RiskCommand::Override.as_kind().to_string(),
+    ]
+}
+
+fn capabilities_payload() -> CapabilitiesPayload {
+    CapabilitiesPayload {
+        protocol_version: PROTOCOL_VERSION,
+        status_schema_version: STATUS_SCHEMA_VERSION,
+        command_kinds_supported: command_kinds_supported(),
+        daemon_build: daemon_build_payload(),
+    }
+}
+
 fn status_response(request: &Envelope, state: &EngineState) -> Envelope {
     let recent_events: Vec<_> = state.recent_events.iter().cloned().collect();
     Envelope::response_to(
         request,
         json!({
             "ok": true,
+            "protocol_version": PROTOCOL_VERSION,
+            "status_schema_version": STATUS_SCHEMA_VERSION,
+            "daemon_build": daemon_build_payload(),
             "state": engine_state_payload(state),
             "risk": {
                 "limits": risk_limits_payload(state),
@@ -1293,5 +1342,49 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(state_path);
+    }
+
+    #[test]
+    fn capabilities_include_supported_commands_and_versions() {
+        let capabilities = capabilities_payload();
+
+        assert_eq!(capabilities.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(capabilities.status_schema_version, STATUS_SCHEMA_VERSION);
+        assert!(capabilities
+            .command_kinds_supported
+            .contains(&"Control.Capabilities".to_string()));
+        assert!(capabilities
+            .command_kinds_supported
+            .contains(&"Engine.Status".to_string()));
+        assert!(capabilities
+            .command_kinds_supported
+            .contains(&"Risk.Status".to_string()));
+    }
+
+    #[test]
+    fn status_response_includes_schema_metadata() {
+        let state = initial_engine_state(unique_state_path("status-schema"), 0);
+        let req = Envelope::new("Engine.Status", serde_json::json!({}));
+        let resp = status_response(&req, &state);
+
+        assert_eq!(
+            resp.payload
+                .get("status_schema_version")
+                .and_then(|v| v.as_u64()),
+            Some(u64::from(STATUS_SCHEMA_VERSION))
+        );
+        assert_eq!(
+            resp.payload
+                .get("protocol_version")
+                .and_then(|v| v.as_u64()),
+            Some(u64::from(PROTOCOL_VERSION))
+        );
+        assert_eq!(
+            resp.payload
+                .get("daemon_build")
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str()),
+            Some(env!("CARGO_PKG_NAME"))
+        );
     }
 }

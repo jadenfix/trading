@@ -38,6 +38,44 @@ jobs:
       - name: Run unified test command
         run: bash ./trading-cli test
 
+  trading-bridge-rust-tests:
+    name: trading bridge rust tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run trading bridge rust tests
+        run: cargo test --manifest-path crates/Cargo.toml -p trading_protocol -p trading_daemon -p tradingctl
+
+  trading-bridge-extension-tests:
+    name: trading bridge extension tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install extension dependencies
+        run: npm install --no-fund --no-audit
+        working-directory: .openclaw/extensions/trading-bridge
+
+      - name: Run extension tests
+        run: npm test
+        working-directory: .openclaw/extensions/trading-bridge
+
   observability-api-tests:
     name: observability API tests
     runs-on: ubuntu-latest

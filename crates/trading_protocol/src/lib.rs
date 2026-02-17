@@ -3,6 +3,7 @@ use tokio_util::codec::LengthDelimitedCodec;
 use uuid::Uuid;
 
 pub const PROTOCOL_VERSION: u8 = 1;
+pub const STATUS_SCHEMA_VERSION: u16 = 2;
 pub const DEFAULT_SOCKET_PATH: &str = "/var/run/openclaw/trading.sock";
 pub const MAX_FRAME_LENGTH: usize = 1024 * 1024; // 1 MiB
 
@@ -58,6 +59,8 @@ pub enum ControlCommand {
     Status,
     #[serde(rename = "Control.Ping")]
     Ping,
+    #[serde(rename = "Control.Capabilities")]
+    Capabilities,
 }
 
 impl ControlCommand {
@@ -67,6 +70,7 @@ impl ControlCommand {
             Self::Stop => "Control.Stop",
             Self::Status => "Control.Status",
             Self::Ping => "Control.Ping",
+            Self::Capabilities => "Control.Capabilities",
         }
     }
 
@@ -76,6 +80,7 @@ impl ControlCommand {
             "Control.Stop" => Some(Self::Stop),
             "Control.Status" => Some(Self::Status),
             "Control.Ping" => Some(Self::Ping),
+            "Control.Capabilities" => Some(Self::Capabilities),
             _ => None,
         }
     }
@@ -212,6 +217,21 @@ pub struct EngineStatePayload {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DaemonBuildPayload {
+    pub name: String,
+    pub version: String,
+    pub git_sha: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CapabilitiesPayload {
+    pub protocol_version: u8,
+    pub status_schema_version: u16,
+    pub command_kinds_supported: Vec<String>,
+    pub daemon_build: DaemonBuildPayload,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct StrategySummaryPayload {
     pub id: String,
     pub enabled: bool,
@@ -324,6 +344,10 @@ mod tests {
         assert_eq!(
             RequestKind::from_kind("Control.Status"),
             Some(RequestKind::Control(ControlCommand::Status))
+        );
+        assert_eq!(
+            RequestKind::from_kind("Control.Capabilities"),
+            Some(RequestKind::Control(ControlCommand::Capabilities))
         );
         assert_eq!(
             RequestKind::from_kind("Engine.Pause"),

@@ -276,7 +276,7 @@ fn build_adapters() -> AdapterRegistry {
             }
         }
     } else {
-        warn!("Coinbase credentials missing; live spot execution unavailable");
+        warn!("COINBASE_BEARER_TOKEN missing; live spot execution unavailable");
         None
     };
 

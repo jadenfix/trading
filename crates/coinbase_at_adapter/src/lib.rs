@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::env;
-use std::process::Command;
 use std::sync::Arc;
 
 use exchange_core::{
@@ -8,45 +7,43 @@ use exchange_core::{
     ExchangeValueFuture, FillReport, InstrumentType, NormalizedOrderRequest, OpenOrderSnapshot,
     OrderAck, OrderSide, OrderSnapshot, OrderStatus, OrderType, PositionSnapshot,
 };
+use reqwest::{header, Method};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
-use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct CoinbaseAdvancedTradeAdapter {
     api_base: String,
-    api_key: String,
-    api_secret: String,
-    api_passphrase: Option<String>,
-    bearer_token: Option<String>,
+    http_client: reqwest::Client,
+    bearer_token: String,
     orders: Arc<Mutex<HashMap<String, OrderSnapshot>>>,
     fills: Arc<Mutex<Vec<FillReport>>>,
 }
 
 impl CoinbaseAdvancedTradeAdapter {
     pub fn from_env() -> Result<Self, ExchangeError> {
-        let api_key = env::var("COINBASE_API_KEY").map_err(|_| {
-            ExchangeError::new("missing_credentials", "COINBASE_API_KEY is required", false)
-        })?;
-        let api_secret = env::var("COINBASE_API_SECRET").map_err(|_| {
+        let bearer_token = env::var("COINBASE_BEARER_TOKEN").map_err(|_| {
             ExchangeError::new(
                 "missing_credentials",
-                "COINBASE_API_SECRET is required",
+                "COINBASE_BEARER_TOKEN is required",
                 false,
             )
         })?;
-        let api_passphrase = env::var("COINBASE_API_PASSPHRASE").ok();
-        let bearer_token = env::var("COINBASE_BEARER_TOKEN").ok();
         let api_base = env::var("COINBASE_API_BASE_URL")
             .unwrap_or_else(|_| "https://api.coinbase.com".to_string())
             .trim_end_matches('/')
             .to_string();
+        let http_client = reqwest::Client::builder().build().map_err(|e| {
+            ExchangeError::new(
+                "http_client_init",
+                format!("failed to initialize HTTP client: {e}"),
+                false,
+            )
+        })?;
 
         Ok(Self {
             api_base,
-            api_key,
-            api_secret,
-            api_passphrase,
+            http_client,
             bearer_token,
             orders: Arc::new(Mutex::new(HashMap::new())),
             fills: Arc::new(Mutex::new(Vec::new())),
@@ -54,79 +51,71 @@ impl CoinbaseAdvancedTradeAdapter {
     }
 
     pub fn credentials_present() -> bool {
-        env::var("COINBASE_API_KEY").is_ok() && env::var("COINBASE_API_SECRET").is_ok()
+        env::var("COINBASE_BEARER_TOKEN").is_ok()
     }
 
     fn now_ms() -> i64 {
         chrono::Utc::now().timestamp_millis()
     }
 
-    fn run_curl_json(
+    async fn run_http_json(
         &self,
         method: &str,
         path: &str,
         body: Option<&Value>,
     ) -> Result<Value, ExchangeError> {
-        let mut command = Command::new("curl");
-        command.arg("-sS").arg("-X").arg(method);
-
-        command.arg("-H").arg("content-type: application/json");
-        command
-            .arg("-H")
-            .arg(format!("CB-ACCESS-KEY: {}", self.api_key));
-        command
-            .arg("-H")
-            .arg(format!("CB-ACCESS-SECRET: {}", self.api_secret));
-
-        if let Some(passphrase) = &self.api_passphrase {
-            command
-                .arg("-H")
-                .arg(format!("CB-ACCESS-PASSPHRASE: {}", passphrase));
-        }
-
-        if let Some(token) = &self.bearer_token {
-            command
-                .arg("-H")
-                .arg(format!("Authorization: Bearer {}", token));
-        }
+        let method = Method::from_bytes(method.as_bytes()).map_err(|e| {
+            ExchangeError::new(
+                "invalid_http_method",
+                format!("invalid HTTP method `{method}`: {e}"),
+                false,
+            )
+        })?;
+        let mut request = self
+            .http_client
+            .request(method, format!("{}{}", self.api_base, path))
+            .header(header::CONTENT_TYPE, "application/json")
+            .bearer_auth(&self.bearer_token);
 
         if let Some(body) = body {
-            let encoded = serde_json::to_string(body).map_err(|e| {
-                ExchangeError::new("json_encode", format!("failed to encode body: {e}"), false)
-            })?;
-            command.arg("--data").arg(encoded);
+            request = request.json(body);
         }
 
-        command.arg(format!("{}{}", self.api_base, path));
-
-        let output = command.output().map_err(|e| {
-            ExchangeError::new("curl_exec", format!("failed to execute curl: {e}"), true)
+        let response = request.send().await.map_err(|e| {
+            ExchangeError::new("venue_http_send", format!("request failed: {e}"), true)
+        })?;
+        let status = response.status();
+        let response_text = response.text().await.map_err(|e| {
+            ExchangeError::new(
+                "venue_http_read",
+                format!("failed to read response body: {e}"),
+                true,
+            )
         })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
+        if !status.is_success() {
             return Err(ExchangeError::new(
                 "venue_http_error",
                 format!(
-                    "curl failed status={} stderr={} stdout={}",
-                    output.status,
-                    stderr.trim(),
-                    stdout.trim()
+                    "coinbase_at returned status={} body={}",
+                    status,
+                    response_text.trim()
                 ),
-                true,
+                status.is_server_error(),
             ));
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if stdout.trim().is_empty() {
+        if response_text.trim().is_empty() {
             return Ok(json!({}));
         }
 
-        serde_json::from_str::<Value>(&stdout).map_err(|e| {
+        serde_json::from_str::<Value>(&response_text).map_err(|e| {
             ExchangeError::new(
                 "json_decode",
-                format!("invalid venue json response: {e}; body={}", stdout.trim()),
+                format!(
+                    "invalid venue json response: {e}; body={}",
+                    response_text.trim()
+                ),
                 false,
             )
         })
@@ -145,6 +134,49 @@ impl CoinbaseAdvancedTradeAdapter {
                     .map(ToString::to_string)
             })
     }
+
+    fn extract_order_error(payload: &Value) -> Option<String> {
+        payload
+            .get("error_response")
+            .and_then(|error| {
+                error
+                    .get("message")
+                    .or_else(|| error.get("error"))
+                    .or_else(|| error.get("reason"))
+                    .and_then(Value::as_str)
+            })
+            .map(ToString::to_string)
+            .or_else(|| {
+                payload
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .or_else(|| {
+                payload
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+    }
+
+    fn parse_order_id(payload: &Value) -> Result<String, ExchangeError> {
+        if let Some(order_id) = Self::extract_order_id(payload) {
+            return Ok(order_id);
+        }
+        if let Some(message) = Self::extract_order_error(payload) {
+            return Err(ExchangeError::new(
+                "order_rejected",
+                format!("coinbase_at rejected order: {message}"),
+                false,
+            ));
+        }
+        Err(ExchangeError::new(
+            "missing_order_id",
+            format!("coinbase_at response missing order_id: {payload}"),
+            false,
+        ))
+    }
 }
 
 impl ExchangeAdapter for CoinbaseAdvancedTradeAdapter {
@@ -154,7 +186,8 @@ impl ExchangeAdapter for CoinbaseAdvancedTradeAdapter {
 
     fn connect_market_data(&self) -> ExchangeResultFuture<'_, ()> {
         Box::pin(async move {
-            self.run_curl_json("GET", "/api/v3/brokerage/time", None)
+            self.run_http_json("GET", "/api/v3/brokerage/time", None)
+                .await
                 .map(|_| ())
         })
     }
@@ -200,11 +233,12 @@ impl ExchangeAdapter for CoinbaseAdvancedTradeAdapter {
                 "order_configuration": order_configuration,
             });
 
-            let response = self.run_curl_json("POST", "/api/v3/brokerage/orders", Some(&body))?;
+            let response = self
+                .run_http_json("POST", "/api/v3/brokerage/orders", Some(&body))
+                .await?;
 
             let now = Self::now_ms();
-            let venue_order_id = Self::extract_order_id(&response)
-                .unwrap_or_else(|| format!("cbat-{}", Uuid::new_v4().as_simple()));
+            let venue_order_id = Self::parse_order_id(&response)?;
 
             let snapshot = OrderSnapshot {
                 venue: self.venue().to_string(),
@@ -247,7 +281,8 @@ impl ExchangeAdapter for CoinbaseAdvancedTradeAdapter {
         let venue_order_id = venue_order_id.to_string();
         Box::pin(async move {
             let body = json!({ "order_ids": [venue_order_id.clone()] });
-            self.run_curl_json("POST", "/api/v3/brokerage/orders/batch_cancel", Some(&body))?;
+            self.run_http_json("POST", "/api/v3/brokerage/orders/batch_cancel", Some(&body))
+                .await?;
 
             if let Some(order) = self.orders.lock().await.get_mut(&venue_order_id) {
                 order.status = OrderStatus::Canceled;
@@ -306,7 +341,9 @@ impl ExchangeAdapter for CoinbaseAdvancedTradeAdapter {
 
     fn sync_balances(&self) -> ExchangeResultFuture<'_, Vec<BalanceSnapshot>> {
         Box::pin(async move {
-            let payload = self.run_curl_json("GET", "/api/v3/brokerage/accounts", None)?;
+            let payload = self
+                .run_http_json("GET", "/api/v3/brokerage/accounts", None)
+                .await?;
 
             let mut balances = Vec::new();
             if let Some(accounts) = payload.get("accounts").and_then(Value::as_array) {
@@ -344,7 +381,8 @@ impl ExchangeAdapter for CoinbaseAdvancedTradeAdapter {
     fn health(&self) -> ExchangeValueFuture<'_, ExchangeHealth> {
         Box::pin(async move {
             let healthy = self
-                .run_curl_json("GET", "/api/v3/brokerage/time", None)
+                .run_http_json("GET", "/api/v3/brokerage/time", None)
+                .await
                 .is_ok();
 
             ExchangeHealth {
@@ -359,5 +397,43 @@ impl ExchangeAdapter for CoinbaseAdvancedTradeAdapter {
                 },
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_order_id_accepts_success_response_shape() {
+        let payload = json!({
+            "success_response": {
+                "order_id": "abc-123"
+            }
+        });
+        let order_id = CoinbaseAdvancedTradeAdapter::parse_order_id(&payload)
+            .expect("order id should be extracted");
+        assert_eq!(order_id, "abc-123");
+    }
+
+    #[test]
+    fn parse_order_id_surfaces_venue_rejection() {
+        let payload = json!({
+            "error_response": {
+                "message": "INSUFFICIENT_FUND"
+            }
+        });
+        let err = CoinbaseAdvancedTradeAdapter::parse_order_id(&payload)
+            .expect_err("expected rejection error");
+        assert_eq!(err.code, "order_rejected");
+        assert!(err.message.contains("INSUFFICIENT_FUND"));
+    }
+
+    #[test]
+    fn parse_order_id_fails_when_response_shape_is_unknown() {
+        let payload = json!({ "success": true });
+        let err = CoinbaseAdvancedTradeAdapter::parse_order_id(&payload)
+            .expect_err("missing order id must fail");
+        assert_eq!(err.code, "missing_order_id");
     }
 }

@@ -396,7 +396,7 @@ fn default_execution_modes(venues: &HashMap<String, VenueState>) -> HashMap<Stri
             let mode = if venue.paper_only {
                 ExecutionMode::Paper
             } else {
-                ExecutionMode::Paper
+                ExecutionMode::Live
             };
             modes.insert(mode_key(&venue.id, *market_type), mode);
         }
@@ -2614,5 +2614,24 @@ mod tests {
 
         let _ = std::fs::remove_file(state_path);
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn default_execution_modes_respect_paper_only_flag() {
+        let venues = default_venues();
+        let modes = default_execution_modes(&venues);
+
+        assert_eq!(
+            modes.get(&mode_key("derivatives_paper", MarketType::Perpetual)),
+            Some(&ExecutionMode::Paper)
+        );
+        assert_eq!(
+            modes.get(&mode_key("kalshi", MarketType::Binary)),
+            Some(&ExecutionMode::Live)
+        );
+        assert_eq!(
+            modes.get(&mode_key("coinbase_spot", MarketType::Spot)),
+            Some(&ExecutionMode::Live)
+        );
     }
 }

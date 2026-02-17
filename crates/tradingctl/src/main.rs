@@ -30,6 +30,8 @@ enum Commands {
     Stop,
     /// Send Control.Ping command
     Ping,
+    /// Send Control.Capabilities command
+    Capabilities,
     /// Send Engine.Status command
     EngineStatus,
     /// Send Engine.Pause command
@@ -129,6 +131,10 @@ async fn main() -> Result<()> {
         Commands::Start => (ControlCommand::Start.as_kind(), serde_json::json!({})),
         Commands::Stop => (ControlCommand::Stop.as_kind(), serde_json::json!({})),
         Commands::Ping => (ControlCommand::Ping.as_kind(), serde_json::json!({})),
+        Commands::Capabilities => (
+            ControlCommand::Capabilities.as_kind(),
+            serde_json::json!({}),
+        ),
         Commands::Pause => (EngineCommand::Pause.as_kind(), serde_json::json!({})),
         Commands::Resume => (EngineCommand::Resume.as_kind(), serde_json::json!({})),
         Commands::KillSwitch => (EngineCommand::KillSwitch.as_kind(), serde_json::json!({})),

@@ -8,7 +8,7 @@ Low-latency bridge between OpenClaw tools and a Rust trading daemon over a Unix 
 | --- | --- |
 | `trading_protocol` | Shared frame codec + envelope schema (`type`, `id`, `payload`) |
 | `trading_daemon` | UDS server (`/var/run/openclaw/trading.sock`) handling engine/strategy/risk commands |
-| `tradingctl` | CLI client for `ping`, `status`, `start`, and `stop` |
+| `tradingctl` | CLI client for daemon control/status/capabilities checks |
 | `exchange_core` | Venue abstraction traits and normalized order/account types |
 | `strategy_core` | Regime-aware strategy interface + signal intent schema |
 | `risk_core` | Non-bypassable hard safety-cage policy and evaluators |
@@ -16,7 +16,7 @@ Low-latency bridge between OpenClaw tools and a Rust trading daemon over a Unix 
 
 ## How It Works
 
-1. OpenClaw tool calls (`trading_status`, `trading_control`) are sent by the extension over UDS.
+1. OpenClaw tool calls (`trading_hft`) are sent by the extension over UDS.
 2. `trading_daemon` decodes framed JSON envelopes and processes control commands.
 3. Responses are correlated by envelope `id` and returned to the tool caller.
 
@@ -50,6 +50,8 @@ Quick verification:
 ```bash
 ./trading-cli clawdbot-trading-ping
 ./trading-cli clawdbot-trading-status
+./trading-cli clawdbot-trading-capabilities
+./trading-cli clawdbot-trading-doctor
 ./trading-cli clawdbot-trading-start
 ./trading-cli clawdbot-trading-stop
 ./trading-cli clawdbot-trading-ps
@@ -82,18 +84,14 @@ Terminal 2:
 cd crates
 cargo run -p tradingctl -- --socket /tmp/openclaw/trading.sock ping
 cargo run -p tradingctl -- --socket /tmp/openclaw/trading.sock status
+cargo run -p tradingctl -- --socket /tmp/openclaw/trading.sock capabilities
 ```
 
 ## OpenClaw Tool Surface
 
-The extension registers:
+The extension registers one unified control-plane tool:
 
-- `trading_status`: returns bridge connectivity and daemon status payload
-- `trading_control`: accepts `command` in `start | stop | status | ping`
-- `trading_engine_status`: returns engine + risk + strategy snapshots
-- `trading_engine_control`: accepts `command` in `start | stop | status | ping | pause | resume | killswitch`
-- `trading_strategy_manage`: handles strategy list/enable/disable/upload/promote
-- `trading_risk_status`: returns hard safety-cage limits and runtime risk state
+- `trading_hft`: a single action-based interface for `health`, engine controls, risk controls, and strategy lifecycle operations.
 
 Extension path:
 
@@ -112,6 +110,9 @@ Daemon state configuration:
 Command behavior notes:
 
 - `Control.Status` is still accepted for compatibility, but clients should prefer `Engine.Status`.
+- `Control.Capabilities` reports daemon protocol/schema compatibility (`protocol_version`, `status_schema_version`, supported command kinds, daemon build metadata).
+- `Engine.Status` and `Control.Status` now share the same rich status payload shape and include `status_schema_version`.
+- Plugin/config changes require a gateway restart to take effect (`./trading-cli clawdbot-trading up` or container restart).
 - `Control.Stop` now means halted but not paused (`running=false`, `paused=false`).
 - `Engine.Pause` means safety pause (`running=false`, `paused=true`).
 - `reset_kill_switch` keeps the engine paused until explicit `resume`.

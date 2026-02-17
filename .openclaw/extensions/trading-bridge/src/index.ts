@@ -341,8 +341,8 @@ function asString(value: unknown, field: string): string {
 }
 
 function asNumber(value: unknown, field: string): number {
-  if (typeof value !== "number" || Number.isNaN(value)) {
-    throw new Error(`Missing required field '${field}'`);
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`Missing or invalid positive numeric field '${field}'`);
   }
   return value;
 }
@@ -1170,14 +1170,18 @@ export default function (api: any) {
                 symbol: asString(input.symbol, "symbol"),
                 asset_class: asString(input.asset_class, "asset_class"),
                 market_type: asString(input.market_type, "market_type"),
-                expiry_ts_ms: typeof input.expiry_ts_ms === "number" ? input.expiry_ts_ms : null,
-                strike: typeof input.strike === "number" ? input.strike : null,
+                expiry_ts_ms:
+                  typeof input.expiry_ts_ms === "number" && Number.isFinite(input.expiry_ts_ms)
+                    ? input.expiry_ts_ms
+                    : null,
+                strike: typeof input.strike === "number" && Number.isFinite(input.strike) ? input.strike : null,
                 option_type: typeof input.option_type === "string" ? input.option_type : null,
               },
               side: asString(input.side, "side"),
               order_type: asString(input.order_type, "order_type"),
               quantity: asNumber(input.quantity, "quantity"),
-              limit_price: typeof input.limit_price === "number" ? input.limit_price : null,
+              limit_price:
+                typeof input.limit_price === "number" && Number.isFinite(input.limit_price) ? input.limit_price : null,
               tif: typeof input.tif === "string" ? input.tif : null,
               post_only: typeof input.post_only === "boolean" ? input.post_only : false,
               reduce_only: typeof input.reduce_only === "boolean" ? input.reduce_only : false,

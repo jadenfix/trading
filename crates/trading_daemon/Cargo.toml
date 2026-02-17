@@ -7,6 +7,11 @@ edition = "2021"
 trading_protocol = { path = "../trading_protocol" }
 risk_core = { path = "../risk_core" }
 strategy_core = { path = "../strategy_core" }
+exchange_core = { path = "../exchange_core" }
+trading_domain = { path = "../trading_domain" }
+exchange_kalshi = { path = "../exchange_kalshi" }
+exchange_coinbase_spot = { path = "../exchange_coinbase_spot" }
+exchange_derivatives_paper = { path = "../exchange_derivatives_paper" }
 tokio = { version = "1.35", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -17,3 +22,4 @@ futures = "0.3"
 fs2 = "0.4" # For file locking
 bytes = "1.5"
 tokio-util = { version = "0.7.10", features = ["codec"] }
+rusqlite = { version = "0.31", features = ["bundled"] }

@@ -1,0 +1,12 @@
+[package]
+name = "exchange_derivatives_paper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1"
+exchange_core = { path = "../exchange_core" }
+trading_domain = { path = "../trading_domain" }
+tokio = { version = "1", features = ["sync"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

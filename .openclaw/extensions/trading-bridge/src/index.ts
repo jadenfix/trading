@@ -24,19 +24,59 @@ type TradingHftAction =
   | "engine_pause"
   | "engine_resume"
   | "engine_killswitch"
+  | "engine_get_mode"
+  | "engine_set_mode"
   | "risk_status"
   | "risk_reset_kill_switch"
+  | "risk_kill_global"
+  | "risk_reset_global"
+  | "risk_kill_venue"
+  | "risk_reset_venue"
+  | "risk_kill_strategy"
+  | "risk_reset_strategy"
   | "strategy_list"
   | "strategy_enable"
   | "strategy_disable"
   | "strategy_upload_candidate"
-  | "strategy_promote_candidate";
+  | "strategy_promote_candidate"
+  | "execution_place"
+  | "execution_cancel"
+  | "execution_get"
+  | "execution_open_orders"
+  | "execution_fills"
+  | "portfolio_positions"
+  | "portfolio_balances"
+  | "portfolio_exposure";
 
 interface TradingHftRequest {
   action: TradingHftAction;
   intent_id?: unknown;
   strategy_id?: unknown;
+  venue?: unknown;
+  venue_order_id?: unknown;
   source?: unknown;
+  symbol?: unknown;
+  side?: unknown;
+  order_type?: unknown;
+  qty?: unknown;
+  limit_price?: unknown;
+  tif?: unknown;
+  post_only?: unknown;
+  reduce_only?: unknown;
+  client_order_id?: unknown;
+  mode?: unknown;
+  asset_class?: unknown;
+  instrument_type?: unknown;
+  base?: unknown;
+  quote?: unknown;
+  expiry_ts_ms?: unknown;
+  strike?: unknown;
+  option_right?: unknown;
+  contract_multiplier?: unknown;
+  approval_token?: unknown;
+  since_ts_ms?: unknown;
+  limit?: unknown;
+  requested_notional_cents?: unknown;
   code_hash?: unknown;
   requested_canary_notional_cents?: unknown;
   auto?: unknown;
@@ -110,15 +150,20 @@ const CAPABILITY_CACHE_TTL_MS = 10_000;
 const MAX_FRAME_LENGTH = 1_048_576; // 1 MiB
 const DEFAULT_CANDIDATE_CANARY_NOTIONAL_CENTS = 250;
 const MIN_PROTOCOL_VERSION = 1;
-const MIN_STATUS_SCHEMA_VERSION = 2;
+const MIN_STATUS_SCHEMA_VERSION = 3;
 const CONFIDENCE_PING_MAX_MS = 250;
 const BRIDGE_VERSION = "0.2.0";
 
 const HIGH_IMPACT_ACTIONS = new Set<TradingHftAction>([
   "engine_start",
   "engine_resume",
+  "engine_set_mode",
+  "execution_place",
   "strategy_promote_candidate",
   "risk_reset_kill_switch",
+  "risk_reset_global",
+  "risk_reset_venue",
+  "risk_reset_strategy",
 ]);
 
 const REQUIRED_COMMANDS = [
@@ -130,6 +175,8 @@ const REQUIRED_COMMANDS = [
   "Engine.Pause",
   "Engine.Resume",
   "Engine.KillSwitch",
+  "Engine.GetMode",
+  "Engine.SetMode",
   "Risk.Status",
   "Risk.Override",
   "Strategy.List",
@@ -137,6 +184,14 @@ const REQUIRED_COMMANDS = [
   "Strategy.Disable",
   "Strategy.UploadCandidate",
   "Strategy.PromoteCandidate",
+  "Execution.Place",
+  "Execution.Cancel",
+  "Execution.Get",
+  "Execution.OpenOrders",
+  "Execution.Fills",
+  "Portfolio.Positions",
+  "Portfolio.Balances",
+  "Portfolio.Exposure",
 ];
 
 class TradingClient extends EventEmitter {
@@ -365,6 +420,31 @@ function asOptionalNotional(value: unknown, fallback: number): number {
   return Math.trunc(value);
 }
 
+function asOptionalNumber(value: unknown, fallback: number | null = null): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return value;
+}
+
+function asOptionalInteger(value: unknown, fallback: number | null = null): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.trunc(value);
+}
+
+function asOptionalEnum(value: unknown, allowed: readonly string[], fallback: string | null = null): string | null {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+  const candidate = value.trim();
+  if (candidate === "") {
+    return fallback;
+  }
+  return allowed.includes(candidate) ? candidate : fallback;
+}
+
 function asIntentId(value: unknown): string {
   if (typeof value !== "string" || value.trim() === "") {
     return randomUUID();
@@ -503,6 +583,7 @@ function extractEngineStrategies(engineStatus: unknown): Array<Record<string, un
 function preconditionCheck(action: TradingHftAction, input: TradingHftRequest, ctx: ActionContext): ConfidenceCheck {
   const engineState = extractEngineState(ctx.engineStatus);
   const strategies = extractEngineStrategies(ctx.engineStatus);
+  const mode = typeof engineState?.mode === "string" ? engineState.mode : null;
 
   switch (action) {
     case "engine_start":
@@ -515,7 +596,8 @@ function preconditionCheck(action: TradingHftAction, input: TradingHftRequest, c
         details: blocked ? "kill switch engaged; action blocked" : "kill switch clear",
       };
     }
-    case "risk_reset_kill_switch": {
+    case "risk_reset_kill_switch":
+    case "risk_reset_global": {
       const killSwitch = engineState?.kill_switch_engaged;
       return {
         name: "action_precondition",
@@ -535,6 +617,33 @@ function preconditionCheck(action: TradingHftAction, input: TradingHftRequest, c
         name: "action_precondition",
         passed: known,
         details: known ? `strategy '${strategyId}' found` : `strategy '${strategyId}' not found in engine snapshot`,
+      };
+    }
+    case "execution_place": {
+      const running = engineState?.running === true;
+      const paused = engineState?.paused === true;
+      if (!running || paused) {
+        return {
+          name: "action_precondition",
+          passed: false,
+          details: "engine must be running and not paused",
+        };
+      }
+      if (mode === "hitl_live") {
+        const approvalToken = typeof input.approval_token === "string" ? input.approval_token.trim() : "";
+        return {
+          name: "action_precondition",
+          passed: approvalToken.length > 0,
+          details:
+            approvalToken.length > 0
+              ? "approval token provided for hitl_live mode"
+              : "approval token required for hitl_live mode",
+        };
+      }
+      return {
+        name: "action_precondition",
+        passed: true,
+        details: "execution preconditions satisfied",
       };
     }
     default:
@@ -560,13 +669,62 @@ function buildCommand(input: TradingHftRequest): { kind: string; payload: Record
       return { kind: "Engine.Resume", payload: {} };
     case "engine_killswitch":
       return { kind: "Engine.KillSwitch", payload: {} };
+    case "engine_get_mode":
+      return { kind: "Engine.GetMode", payload: {} };
+    case "engine_set_mode":
+      return {
+        kind: "Engine.SetMode",
+        payload: {
+          mode: asOptionalEnum(input.mode, ["paper", "hitl_live", "auto_live"], "auto_live"),
+        },
+      };
     case "risk_status":
       return { kind: "Risk.Status", payload: {} };
     case "risk_reset_kill_switch":
+    case "risk_reset_global":
       return {
         kind: "Risk.Override",
         payload: {
-          action: "reset_kill_switch",
+          action: input.action === "risk_reset_kill_switch" ? "reset_kill_switch" : "reset_global",
+        },
+      };
+    case "risk_kill_global":
+      return {
+        kind: "Risk.Override",
+        payload: {
+          action: "kill_global",
+        },
+      };
+    case "risk_kill_venue":
+      return {
+        kind: "Risk.Override",
+        payload: {
+          action: "kill_venue",
+          venue: asString(input.venue, "venue"),
+        },
+      };
+    case "risk_reset_venue":
+      return {
+        kind: "Risk.Override",
+        payload: {
+          action: "reset_venue",
+          venue: asString(input.venue, "venue"),
+        },
+      };
+    case "risk_kill_strategy":
+      return {
+        kind: "Risk.Override",
+        payload: {
+          action: "kill_strategy",
+          strategy_id: asString(input.strategy_id, "strategy_id"),
+        },
+      };
+    case "risk_reset_strategy":
+      return {
+        kind: "Risk.Override",
+        payload: {
+          action: "reset_strategy",
+          strategy_id: asString(input.strategy_id, "strategy_id"),
         },
       };
     case "strategy_list":
@@ -616,6 +774,96 @@ function buildCommand(input: TradingHftRequest): { kind: string; payload: Record
           auto: asOptionalBoolean(input.auto, true),
         },
       };
+    case "execution_place": {
+      const venue = asOptionalNonEmptyString(input.venue, "coinbase_at");
+      const symbol = asString(input.symbol, "symbol");
+      const strategyId = asString(input.strategy_id, "strategy_id");
+      const clientOrderId = asOptionalNonEmptyString(input.client_order_id, `bridge-${randomUUID()}`);
+      const qty = asOptionalNumber(input.qty, null);
+      if (qty === null || qty <= 0) {
+        throw new Error("Missing required positive field 'qty'");
+      }
+
+      const assetClass = asOptionalEnum(
+        input.asset_class,
+        ["Crypto", "Equity", "Prediction", "Fx", "Rates", "Commodity", "Custom"],
+        "Crypto",
+      );
+      const instrumentType = asOptionalEnum(
+        input.instrument_type,
+        ["Spot", "Perpetual", "Future", "Option", "BinaryOption", "Custom"],
+        "Spot",
+      );
+      const orderType = asOptionalEnum(input.order_type, ["Limit", "Market"], "Limit");
+      const side = asOptionalEnum(input.side, ["Buy", "Sell"], "Buy");
+
+      return {
+        kind: "Execution.Place",
+        payload: {
+          order: {
+            venue,
+            symbol,
+            instrument: {
+              venue,
+              venue_symbol: symbol,
+              asset_class: assetClass,
+              instrument_type: instrumentType,
+              base: typeof input.base === "string" ? input.base : null,
+              quote: typeof input.quote === "string" ? input.quote : null,
+              expiry_ts_ms: asOptionalInteger(input.expiry_ts_ms, null),
+              strike: asOptionalNumber(input.strike, null),
+              option_right: asOptionalEnum(input.option_right, ["Call", "Put"], null),
+              contract_multiplier: asOptionalNumber(input.contract_multiplier, null),
+            },
+            strategy_id: strategyId,
+            client_order_id: clientOrderId,
+            intent_id: asOptionalNonEmptyString(input.intent_id, randomUUID()),
+            side,
+            order_type: orderType,
+            qty,
+            limit_price: asOptionalNumber(input.limit_price, null),
+            tif: asOptionalEnum(input.tif, ["Gtc", "Ioc", "Fok", "Day"], null),
+            post_only: asOptionalBoolean(input.post_only, false),
+            reduce_only: asOptionalBoolean(input.reduce_only, false),
+            requested_notional_cents: asOptionalNotional(input.requested_notional_cents, 0),
+          },
+          approval_token:
+            typeof input.approval_token === "string" && input.approval_token.trim() !== ""
+              ? input.approval_token.trim()
+              : null,
+        },
+      };
+    }
+    case "execution_cancel":
+      return {
+        kind: "Execution.Cancel",
+        payload: {
+          venue_order_id: asString(input.venue_order_id, "venue_order_id"),
+        },
+      };
+    case "execution_get":
+      return {
+        kind: "Execution.Get",
+        payload: {
+          venue_order_id: asString(input.venue_order_id, "venue_order_id"),
+        },
+      };
+    case "execution_open_orders":
+      return { kind: "Execution.OpenOrders", payload: {} };
+    case "execution_fills":
+      return {
+        kind: "Execution.Fills",
+        payload: {
+          since_ts_ms: asOptionalInteger(input.since_ts_ms, 0),
+          limit: asOptionalInteger(input.limit, 200),
+        },
+      };
+    case "portfolio_positions":
+      return { kind: "Portfolio.Positions", payload: {} };
+    case "portfolio_balances":
+      return { kind: "Portfolio.Balances", payload: {} };
+    case "portfolio_exposure":
+      return { kind: "Portfolio.Exposure", payload: {} };
     case "health":
       throw new Error("Action 'health' does not map to a daemon command");
     default:
@@ -912,18 +1160,64 @@ export default function (api: any) {
             "engine_pause",
             "engine_resume",
             "engine_killswitch",
+            "engine_get_mode",
+            "engine_set_mode",
             "risk_status",
             "risk_reset_kill_switch",
+            "risk_kill_global",
+            "risk_reset_global",
+            "risk_kill_venue",
+            "risk_reset_venue",
+            "risk_kill_strategy",
+            "risk_reset_strategy",
             "strategy_list",
             "strategy_enable",
             "strategy_disable",
             "strategy_upload_candidate",
             "strategy_promote_candidate",
+            "execution_place",
+            "execution_cancel",
+            "execution_get",
+            "execution_open_orders",
+            "execution_fills",
+            "portfolio_positions",
+            "portfolio_balances",
+            "portfolio_exposure",
           ],
         },
         intent_id: { type: "string" },
         strategy_id: { type: "string" },
+        venue: { type: "string" },
+        venue_order_id: { type: "string" },
         source: { type: "string" },
+        symbol: { type: "string" },
+        side: { type: "string", enum: ["Buy", "Sell"] },
+        order_type: { type: "string", enum: ["Limit", "Market"] },
+        qty: { type: "number" },
+        limit_price: { type: "number" },
+        tif: { type: "string", enum: ["Gtc", "Ioc", "Fok", "Day"] },
+        post_only: { type: "boolean" },
+        reduce_only: { type: "boolean" },
+        client_order_id: { type: "string" },
+        mode: { type: "string", enum: ["paper", "hitl_live", "auto_live"] },
+        asset_class: {
+          type: "string",
+          enum: ["Crypto", "Equity", "Prediction", "Fx", "Rates", "Commodity", "Custom"],
+        },
+        instrument_type: {
+          type: "string",
+          enum: ["Spot", "Perpetual", "Future", "Option", "BinaryOption", "Custom"],
+        },
+        base: { type: "string" },
+        quote: { type: "string" },
+        expiry_ts_ms: { type: "number" },
+        strike: { type: "number" },
+        option_right: { type: "string", enum: ["Call", "Put"] },
+        contract_multiplier: { type: "number" },
+        approval_token: { type: "string" },
+        since_ts_ms: { type: "number" },
+        limit: { type: "number" },
+        requested_notional_cents: { type: "number" },
         code_hash: { type: "string" },
         requested_canary_notional_cents: { type: "number" },
         auto: { type: "boolean" },

@@ -622,6 +622,27 @@ clawdbot_trading_doctor() {
         echo "[$fail] daemon command surface does not include Control.Capabilities" >&2
         failures=$((failures + 1))
       fi
+
+      if echo "$capabilities_output" | grep -q 'Engine.GetMode'; then
+        echo "[$pass] daemon advertises Engine.GetMode command support"
+      else
+        echo "[$fail] daemon command surface does not include Engine.GetMode" >&2
+        failures=$((failures + 1))
+      fi
+
+      if echo "$capabilities_output" | grep -q 'Execution.Place'; then
+        echo "[$pass] daemon advertises Execution.Place command support"
+      else
+        echo "[$fail] daemon command surface does not include Execution.Place" >&2
+        failures=$((failures + 1))
+      fi
+
+      if echo "$capabilities_output" | grep -q 'Portfolio.Exposure'; then
+        echo "[$pass] daemon advertises Portfolio.Exposure command support"
+      else
+        echo "[$fail] daemon command surface does not include Portfolio.Exposure" >&2
+        failures=$((failures + 1))
+      fi
     else
       echo "[$fail] tradingctl capabilities command failed" >&2
       echo "$capabilities_output" >&2
@@ -639,6 +660,20 @@ clawdbot_trading_doctor() {
     else
       echo "[$fail] tradingctl status command failed" >&2
       echo "$status_output" >&2
+      failures=$((failures + 1))
+    fi
+
+    local mode_output
+    if mode_output="$("$docker_bin" compose -f "$compose_file" --project-directory "$ROOT_DIR" exec -T trading-daemon tradingctl engine-get-mode 2>&1)"; then
+      if echo "$mode_output" | grep -q '"mode"'; then
+        echo "[$pass] engine mode endpoint responds with mode payload"
+      else
+        echo "[$fail] engine-get-mode missing mode payload" >&2
+        failures=$((failures + 1))
+      fi
+    else
+      echo "[$fail] tradingctl engine-get-mode command failed" >&2
+      echo "$mode_output" >&2
       failures=$((failures + 1))
     fi
   fi
@@ -675,6 +710,42 @@ clawdbot_trading_doctor() {
         else
           echo "[$fail] failed to call gateway /tools/invoke trading_hft health" >&2
           echo "$gateway_response" >&2
+          failures=$((failures + 1))
+        fi
+
+        local gateway_mode_response
+        if gateway_mode_response="$("$curl_bin" -fsS -X POST "http://127.0.0.1:${gateway_port}/tools/invoke" \
+          -H "content-type: application/json" \
+          -H "authorization: Bearer ${gateway_token}" \
+          --data '{"tool":"trading_hft","action":"json","args":{"action":"engine_get_mode"}}' 2>&1)"; then
+          if echo "$gateway_mode_response" | grep -q '"ok":true'; then
+            echo "[$pass] trading_hft engine_get_mode action responds via gateway /tools/invoke"
+          else
+            echo "[$fail] gateway engine_get_mode action did not return ok=true" >&2
+            echo "$gateway_mode_response" >&2
+            failures=$((failures + 1))
+          fi
+        else
+          echo "[$fail] failed to call gateway /tools/invoke trading_hft engine_get_mode" >&2
+          echo "$gateway_mode_response" >&2
+          failures=$((failures + 1))
+        fi
+
+        local gateway_open_orders_response
+        if gateway_open_orders_response="$("$curl_bin" -fsS -X POST "http://127.0.0.1:${gateway_port}/tools/invoke" \
+          -H "content-type: application/json" \
+          -H "authorization: Bearer ${gateway_token}" \
+          --data '{"tool":"trading_hft","action":"json","args":{"action":"execution_open_orders"}}' 2>&1)"; then
+          if echo "$gateway_open_orders_response" | grep -q '"ok":true'; then
+            echo "[$pass] trading_hft execution_open_orders action responds via gateway /tools/invoke"
+          else
+            echo "[$fail] gateway execution_open_orders action did not return ok=true" >&2
+            echo "$gateway_open_orders_response" >&2
+            failures=$((failures + 1))
+          fi
+        else
+          echo "[$fail] failed to call gateway /tools/invoke trading_hft execution_open_orders" >&2
+          echo "$gateway_open_orders_response" >&2
           failures=$((failures + 1))
         fi
       fi

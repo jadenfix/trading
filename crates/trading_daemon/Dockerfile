@@ -19,6 +19,8 @@ COPY crates/strategy_kalshi_weather ./crates/strategy_kalshi_weather
 COPY crates/strategy_kalshi_arbitrage ./crates/strategy_kalshi_arbitrage
 COPY crates/strategy_crypto_momentum ./crates/strategy_crypto_momentum
 COPY crates/risk_core ./crates/risk_core
+COPY crates/coinbase_at_adapter ./crates/coinbase_at_adapter
+COPY crates/paper_exchange_adapter ./crates/paper_exchange_adapter
 
 WORKDIR /app/crates
 RUN cargo build --release --bin trading_daemon --bin tradingctl
@@ -27,15 +29,15 @@ FROM debian:bookworm-slim
 
 WORKDIR /app
 
-# Install runtime dependencies (OpenSSL, etc.)
-RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
+# Install runtime dependencies (OpenSSL, curl, certs)
+RUN apt-get update && apt-get install -y --no-install-recommends openssl curl ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # Copy binary
 COPY --from=builder /app/crates/target/release/trading_daemon /usr/local/bin/trading_daemon
 COPY --from=builder /app/crates/target/release/tradingctl /usr/local/bin/tradingctl
 
-# Create socket directory with correct permissions
-RUN mkdir -p /var/run/openclaw && chown 1000:1000 /var/run/openclaw
+# Create runtime directories with correct permissions
+RUN mkdir -p /var/run/openclaw /var/lib/openclaw/trading && chown -R 1000:1000 /var/run/openclaw /var/lib/openclaw
 
 # Run as non-root
 USER 1000:1000

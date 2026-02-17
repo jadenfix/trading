@@ -14,4 +14,6 @@ members = [
     "strategy_kalshi_arbitrage",
     "strategy_crypto_momentum",
     "risk_core",
+    "coinbase_at_adapter",
+    "paper_exchange_adapter",
 ]

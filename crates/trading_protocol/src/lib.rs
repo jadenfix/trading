@@ -181,12 +181,128 @@ impl RiskCommand {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VenueCommand {
+    #[serde(rename = "Venue.List")]
+    List,
+    #[serde(rename = "Venue.Enable")]
+    Enable,
+    #[serde(rename = "Venue.Disable")]
+    Disable,
+    #[serde(rename = "Venue.Status")]
+    Status,
+}
+
+impl VenueCommand {
+    pub fn as_kind(self) -> &'static str {
+        match self {
+            Self::List => "Venue.List",
+            Self::Enable => "Venue.Enable",
+            Self::Disable => "Venue.Disable",
+            Self::Status => "Venue.Status",
+        }
+    }
+
+    pub fn from_kind(kind: &str) -> Option<Self> {
+        match kind {
+            "Venue.List" => Some(Self::List),
+            "Venue.Enable" => Some(Self::Enable),
+            "Venue.Disable" => Some(Self::Disable),
+            "Venue.Status" => Some(Self::Status),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortfolioCommand {
+    #[serde(rename = "Portfolio.Balances")]
+    Balances,
+    #[serde(rename = "Portfolio.Positions")]
+    Positions,
+}
+
+impl PortfolioCommand {
+    pub fn as_kind(self) -> &'static str {
+        match self {
+            Self::Balances => "Portfolio.Balances",
+            Self::Positions => "Portfolio.Positions",
+        }
+    }
+
+    pub fn from_kind(kind: &str) -> Option<Self> {
+        match kind {
+            "Portfolio.Balances" => Some(Self::Balances),
+            "Portfolio.Positions" => Some(Self::Positions),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderCommand {
+    #[serde(rename = "Order.Submit")]
+    Submit,
+    #[serde(rename = "Order.Cancel")]
+    Cancel,
+    #[serde(rename = "Order.List")]
+    List,
+}
+
+impl OrderCommand {
+    pub fn as_kind(self) -> &'static str {
+        match self {
+            Self::Submit => "Order.Submit",
+            Self::Cancel => "Order.Cancel",
+            Self::List => "Order.List",
+        }
+    }
+
+    pub fn from_kind(kind: &str) -> Option<Self> {
+        match kind {
+            "Order.Submit" => Some(Self::Submit),
+            "Order.Cancel" => Some(Self::Cancel),
+            "Order.List" => Some(Self::List),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionModeCommand {
+    #[serde(rename = "ExecutionMode.Set")]
+    Set,
+    #[serde(rename = "ExecutionMode.Get")]
+    Get,
+}
+
+impl ExecutionModeCommand {
+    pub fn as_kind(self) -> &'static str {
+        match self {
+            Self::Set => "ExecutionMode.Set",
+            Self::Get => "ExecutionMode.Get",
+        }
+    }
+
+    pub fn from_kind(kind: &str) -> Option<Self> {
+        match kind {
+            "ExecutionMode.Set" => Some(Self::Set),
+            "ExecutionMode.Get" => Some(Self::Get),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestKind {
     Control(ControlCommand),
     Engine(EngineCommand),
     Strategy(StrategyCommand),
     Risk(RiskCommand),
+    Venue(VenueCommand),
+    Portfolio(PortfolioCommand),
+    Order(OrderCommand),
+    ExecutionMode(ExecutionModeCommand),
 }
 
 impl RequestKind {
@@ -200,7 +316,19 @@ impl RequestKind {
         if let Some(cmd) = StrategyCommand::from_kind(kind) {
             return Some(Self::Strategy(cmd));
         }
-        RiskCommand::from_kind(kind).map(Self::Risk)
+        if let Some(cmd) = RiskCommand::from_kind(kind) {
+            return Some(Self::Risk(cmd));
+        }
+        if let Some(cmd) = VenueCommand::from_kind(kind) {
+            return Some(Self::Venue(cmd));
+        }
+        if let Some(cmd) = PortfolioCommand::from_kind(kind) {
+            return Some(Self::Portfolio(cmd));
+        }
+        if let Some(cmd) = OrderCommand::from_kind(kind) {
+            return Some(Self::Order(cmd));
+        }
+        ExecutionModeCommand::from_kind(kind).map(Self::ExecutionMode)
     }
 }
 
@@ -288,6 +416,97 @@ pub struct RiskOverridePayload {
     pub value: Option<serde_json::Value>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VenueTogglePayload {
+    pub venue_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VenueSummaryPayload {
+    pub venue_id: String,
+    pub enabled: bool,
+    pub market_types: Vec<String>,
+    pub healthy: bool,
+    pub live_enabled: bool,
+    pub paper_only: bool,
+    pub message: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct InstrumentRefPayload {
+    pub venue_id: String,
+    pub symbol: String,
+    pub asset_class: String,
+    pub market_type: String,
+    pub expiry_ts_ms: Option<i64>,
+    pub strike: Option<f64>,
+    pub option_type: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PortfolioBalancePayload {
+    pub venue_id: String,
+    pub asset: String,
+    pub total: f64,
+    pub available: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PortfolioPositionPayload {
+    pub venue_id: String,
+    pub instrument: InstrumentRefPayload,
+    pub quantity: f64,
+    pub avg_price: f64,
+    pub mark_price: Option<f64>,
+    pub unrealized_pnl: Option<f64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct OrderSubmitPayload {
+    pub strategy_id: String,
+    pub venue_id: String,
+    pub instrument: InstrumentRefPayload,
+    pub side: String,
+    pub order_type: String,
+    pub quantity: f64,
+    pub limit_price: Option<f64>,
+    pub tif: Option<String>,
+    pub post_only: bool,
+    pub reduce_only: bool,
+    pub client_order_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct OrderCancelPayload {
+    pub venue_id: Option<String>,
+    pub venue_order_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct OrderListItemPayload {
+    pub venue_order_id: String,
+    pub client_order_id: String,
+    pub strategy_id: String,
+    pub venue_id: String,
+    pub instrument: InstrumentRefPayload,
+    pub side: String,
+    pub order_type: String,
+    pub quantity: f64,
+    pub filled_quantity: f64,
+    pub avg_fill_price: Option<f64>,
+    pub status: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub message: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExecutionModePayload {
+    pub venue_id: String,
+    pub market_type: String,
+    pub mode: String,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Event {
     #[serde(rename = "Event.Alert")]
@@ -360,6 +579,22 @@ mod tests {
         assert_eq!(
             RequestKind::from_kind("Risk.Override"),
             Some(RequestKind::Risk(RiskCommand::Override))
+        );
+        assert_eq!(
+            RequestKind::from_kind("Venue.List"),
+            Some(RequestKind::Venue(VenueCommand::List))
+        );
+        assert_eq!(
+            RequestKind::from_kind("Portfolio.Balances"),
+            Some(RequestKind::Portfolio(PortfolioCommand::Balances))
+        );
+        assert_eq!(
+            RequestKind::from_kind("Order.Submit"),
+            Some(RequestKind::Order(OrderCommand::Submit))
+        );
+        assert_eq!(
+            RequestKind::from_kind("ExecutionMode.Get"),
+            Some(RequestKind::ExecutionMode(ExecutionModeCommand::Get))
         );
         assert_eq!(RequestKind::from_kind("Unknown.Command"), None);
     }

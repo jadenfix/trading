@@ -1,10 +1,17 @@
 [workspace]
 resolver = "2"
 members = [
+    "trading_domain",
     "trading_protocol",
     "trading_daemon",
     "tradingctl",
     "exchange_core",
+    "exchange_kalshi",
+    "exchange_coinbase_spot",
+    "exchange_derivatives_paper",
     "strategy_core",
+    "strategy_kalshi_weather",
+    "strategy_kalshi_arbitrage",
+    "strategy_crypto_momentum",
     "risk_core",
 ]

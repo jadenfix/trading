@@ -95,6 +95,14 @@ interface ActionContext {
   riskStatus: unknown | null;
 }
 
+type VenueManageAction = "list" | "enable" | "disable" | "status";
+
+type OrderManageAction = "submit" | "cancel" | "list";
+
+type PortfolioStatusAction = "balances" | "positions";
+
+type ExecutionModeAction = "get" | "set";
+
 const DEFAULT_SOCKET_PATH = "/var/run/openclaw/trading.sock";
 const RECONNECT_DELAY_MS = 3_000;
 const REQUEST_TIMEOUT_MS = 5_000;
@@ -330,6 +338,13 @@ function asString(value: unknown, field: string): string {
     throw new Error(`Missing required field '${field}'`);
   }
   return value.trim();
+}
+
+function asNumber(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`Missing or invalid positive numeric field '${field}'`);
+  }
+  return value;
 }
 
 function asOptionalNonEmptyString(value: unknown, fallback: string): string {
@@ -609,7 +624,6 @@ function buildCommand(input: TradingHftRequest): { kind: string; payload: Record
 }
 
 export { buildCommand, capabilityCompatibilityChecks, parseCapabilities };
-
 // OpenClaw extension entry point.
 // @ts-ignore
 export default function (api: any) {
@@ -1020,6 +1034,285 @@ export default function (api: any) {
             message: errorMessage,
           },
         });
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "trading_venue_manage",
+    description: "List, enable, disable, or inspect venue status.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["list", "enable", "disable", "status"] },
+        venue_id: { type: "string" },
+      },
+      required: ["action"],
+    },
+    execute: async (input: { action: VenueManageAction; venue_id?: unknown }) => {
+      if (!client.state.connected) {
+        return {
+          sent: false,
+          action: input.action,
+          connected: false,
+          error: "Trading daemon is not connected",
+        };
+      }
+
+      try {
+        let kind = "";
+        let payload: Record<string, unknown> = {};
+        switch (input.action) {
+          case "list":
+            kind = "Venue.List";
+            break;
+          case "enable":
+            kind = "Venue.Enable";
+            payload = { venue_id: asString(input.venue_id, "venue_id") };
+            break;
+          case "disable":
+            kind = "Venue.Disable";
+            payload = { venue_id: asString(input.venue_id, "venue_id") };
+            break;
+          case "status":
+            kind = "Venue.Status";
+            payload = { venue_id: asString(input.venue_id, "venue_id") };
+            break;
+          default:
+            throw new Error(`Unsupported venue action '${input.action}'`);
+        }
+
+        const response = await client.request(kind, payload);
+        return {
+          sent: true,
+          action: input.action,
+          response: response.payload,
+        };
+      } catch (error) {
+        return {
+          sent: false,
+          action: input.action,
+          connected: client.state.connected,
+          error: toErrorMessage(error),
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "trading_order_manage",
+    description: "Submit, cancel, or list orders across enabled venues.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["submit", "cancel", "list"] },
+        strategy_id: { type: "string" },
+        venue_id: { type: "string" },
+        symbol: { type: "string" },
+        asset_class: { type: "string" },
+        market_type: { type: "string" },
+        side: { type: "string" },
+        order_type: { type: "string" },
+        quantity: { type: "number" },
+        limit_price: { type: "number" },
+        tif: { type: "string" },
+        post_only: { type: "boolean" },
+        reduce_only: { type: "boolean" },
+        client_order_id: { type: "string" },
+        expiry_ts_ms: { type: "number" },
+        strike: { type: "number" },
+        option_type: { type: "string" },
+        venue_order_id: { type: "string" },
+      },
+      required: ["action"],
+    },
+    execute: async (input: {
+      action: OrderManageAction;
+      strategy_id?: unknown;
+      venue_id?: unknown;
+      symbol?: unknown;
+      asset_class?: unknown;
+      market_type?: unknown;
+      side?: unknown;
+      order_type?: unknown;
+      quantity?: unknown;
+      limit_price?: unknown;
+      tif?: unknown;
+      post_only?: unknown;
+      reduce_only?: unknown;
+      client_order_id?: unknown;
+      expiry_ts_ms?: unknown;
+      strike?: unknown;
+      option_type?: unknown;
+      venue_order_id?: unknown;
+    }) => {
+      if (!client.state.connected) {
+        return {
+          sent: false,
+          action: input.action,
+          connected: false,
+          error: "Trading daemon is not connected",
+        };
+      }
+
+      try {
+        let kind = "";
+        let payload: Record<string, unknown> = {};
+
+        switch (input.action) {
+          case "submit":
+            kind = "Order.Submit";
+            payload = {
+              strategy_id: asString(input.strategy_id, "strategy_id"),
+              venue_id: asString(input.venue_id, "venue_id"),
+              instrument: {
+                venue_id: asString(input.venue_id, "venue_id"),
+                symbol: asString(input.symbol, "symbol"),
+                asset_class: asString(input.asset_class, "asset_class"),
+                market_type: asString(input.market_type, "market_type"),
+                expiry_ts_ms:
+                  typeof input.expiry_ts_ms === "number" && Number.isFinite(input.expiry_ts_ms)
+                    ? input.expiry_ts_ms
+                    : null,
+                strike: typeof input.strike === "number" && Number.isFinite(input.strike) ? input.strike : null,
+                option_type: typeof input.option_type === "string" ? input.option_type : null,
+              },
+              side: asString(input.side, "side"),
+              order_type: asString(input.order_type, "order_type"),
+              quantity: asNumber(input.quantity, "quantity"),
+              limit_price:
+                typeof input.limit_price === "number" && Number.isFinite(input.limit_price) ? input.limit_price : null,
+              tif: typeof input.tif === "string" ? input.tif : null,
+              post_only: typeof input.post_only === "boolean" ? input.post_only : false,
+              reduce_only: typeof input.reduce_only === "boolean" ? input.reduce_only : false,
+              client_order_id: asString(input.client_order_id, "client_order_id"),
+            };
+            break;
+          case "cancel":
+            kind = "Order.Cancel";
+            payload = {
+              venue_id: typeof input.venue_id === "string" ? input.venue_id : null,
+              venue_order_id: asString(input.venue_order_id, "venue_order_id"),
+            };
+            break;
+          case "list":
+            kind = "Order.List";
+            payload = {
+              venue_id: typeof input.venue_id === "string" ? input.venue_id : null,
+            };
+            break;
+          default:
+            throw new Error(`Unsupported order action '${input.action}'`);
+        }
+
+        const response = await client.request(kind, payload);
+        return {
+          sent: true,
+          action: input.action,
+          response: response.payload,
+        };
+      } catch (error) {
+        return {
+          sent: false,
+          action: input.action,
+          connected: client.state.connected,
+          error: toErrorMessage(error),
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "trading_portfolio_status",
+    description: "Get normalized balances or positions across enabled venues.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["balances", "positions"] },
+      },
+      required: ["action"],
+    },
+    execute: async (input: { action: PortfolioStatusAction }) => {
+      if (!client.state.connected) {
+        return {
+          connected: false,
+          socketPath,
+          action: input.action,
+          portfolio: null,
+          error: "Trading daemon is not connected",
+        };
+      }
+
+      try {
+        const kind = input.action === "balances" ? "Portfolio.Balances" : "Portfolio.Positions";
+        const response = await client.request(kind, {});
+        return {
+          connected: true,
+          socketPath,
+          action: input.action,
+          portfolio: response.payload,
+        };
+      } catch (error) {
+        return {
+          connected: client.state.connected,
+          socketPath,
+          action: input.action,
+          error: toErrorMessage(error),
+          portfolio: null,
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "trading_execution_mode",
+    description: "Get or set paper/live execution mode for a venue market type.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["get", "set"] },
+        venue_id: { type: "string" },
+        market_type: { type: "string" },
+        mode: { type: "string", enum: ["paper", "live"] },
+      },
+      required: ["action", "venue_id", "market_type"],
+    },
+    execute: async (input: {
+      action: ExecutionModeAction;
+      venue_id?: unknown;
+      market_type?: unknown;
+      mode?: unknown;
+    }) => {
+      if (!client.state.connected) {
+        return {
+          sent: false,
+          action: input.action,
+          connected: false,
+          error: "Trading daemon is not connected",
+        };
+      }
+
+      try {
+        const kind = input.action === "set" ? "ExecutionMode.Set" : "ExecutionMode.Get";
+        const payload = {
+          venue_id: asString(input.venue_id, "venue_id"),
+          market_type: asString(input.market_type, "market_type"),
+          mode: input.action === "set" ? asString(input.mode, "mode") : "",
+        };
+
+        const response = await client.request(kind, payload);
+        return {
+          sent: true,
+          action: input.action,
+          response: response.payload,
+        };
+      } catch (error) {
+        return {
+          sent: false,
+          action: input.action,
+          connected: client.state.connected,
+          error: toErrorMessage(error),
+        };
       }
     },
   });

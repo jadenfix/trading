@@ -246,3 +246,12 @@ Default trade logs:
 - `TRADES/sports-agent`
 
 Use `TRADES_DIR=/custom/path` to change the root folder.
+
+## Developer Information
+
+**Pull Request Requirements:**
+
+1. **Greptile Comments**: All comments from Greptile must be addressed and resolved before requesting a review.
+2. **Linting & Formatting**: Ensure your code is formatted (`cargo fmt`) and linted (`cargo clippy`) without warnings.
+3. **Tests**: Verify all tests pass by running `bash ./trading-cli test`.
+4. **Commit Hygiene**: Use clear commit messages and squash intermediate work-in-progress commits.

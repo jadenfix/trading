@@ -138,6 +138,7 @@ struct EngineState {
     processed_intents: HashSet<String>,
     portfolio_positions: Vec<PositionSnapshot>,
     portfolio_balances: Vec<BalanceSnapshot>,
+    last_orders_reset_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,14 +214,15 @@ async fn main() -> Result<()> {
 
     let adapters = Arc::new(build_adapters());
     let state = Arc::new(Mutex::new(initial_engine_state(
-        data_dir,
+        data_dir.clone(),
         state_path,
         candidate_ttl_ms,
         default_mode,
         adapters.coinbase.is_some(),
     )));
 
-    recover_from_todays_journals(&state).await;
+    cleanup_old_journals(&data_dir, 7);
+    recover_from_journals(&state).await;
 
     let context = DaemonContext {
         state: Arc::clone(&state),
@@ -420,6 +422,7 @@ fn initial_engine_state(
         processed_intents: HashSet::new(),
         portfolio_positions: Vec::new(),
         portfolio_balances: Vec::new(),
+        last_orders_reset_ms: now,
     };
 
     match load_engine_snapshot(&state.state_path) {
@@ -622,21 +625,6 @@ fn journal_path(data_dir: &str, stream: &str) -> PathBuf {
 
 fn write_journal_entry(data_dir: &str, stream: &str, entry: &serde_json::Value) {
     let path = journal_path(data_dir, stream);
-    if let Some(parent) = path.parent() {
-        if let Err(err) = std::fs::create_dir_all(parent) {
-            warn!("failed to create journal dir {}: {}", parent.display(), err);
-            return;
-        }
-    }
-
-    let mut file = match OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(file) => file,
-        Err(err) => {
-            warn!("failed to open journal {}: {}", path.display(), err);
-            return;
-        }
-    };
-
     let line = match serde_json::to_string(entry) {
         Ok(line) => line,
         Err(err) => {
@@ -645,12 +633,30 @@ fn write_journal_entry(data_dir: &str, stream: &str, entry: &serde_json::Value) 
         }
     };
 
-    if let Err(err) = writeln!(file, "{}", line) {
-        warn!("failed writing journal {}: {}", path.display(), err);
-    }
+    // Offload blocking file I/O to the blocking thread pool
+    tokio::task::spawn_blocking(move || {
+        if let Some(parent) = path.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                warn!("failed to create journal dir {}: {}", parent.display(), err);
+                return;
+            }
+        }
+
+        let mut file = match OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => file,
+            Err(err) => {
+                warn!("failed to open journal {}: {}", path.display(), err);
+                return;
+            }
+        };
+
+        if let Err(err) = writeln!(file, "{}", line) {
+            warn!("failed writing journal {}: {}", path.display(), err);
+        }
+    });
 }
 
-async fn recover_from_todays_journals(state: &Arc<Mutex<EngineState>>) {
+async fn recover_from_journals(state: &Arc<Mutex<EngineState>>) {
     let (data_dir, mut orders, mut fills, mut processed) = {
         let state = state.lock().await;
         (
@@ -661,41 +667,63 @@ async fn recover_from_todays_journals(state: &Arc<Mutex<EngineState>>) {
         )
     };
 
-    let order_path = journal_path(&data_dir, "orders");
-    if let Ok(file) = File::open(&order_path) {
-        let reader = BufReader::new(file);
-        for line in reader.lines().map_while(Result::ok) {
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
+    let journal_dir = Path::new(&data_dir).join("journal");
 
-            if let Some(intent_id) = value.get("intent_id").and_then(serde_json::Value::as_str) {
-                processed.insert(intent_id.to_string());
-            }
-
-            if let Some(order_value) = value.get("order") {
-                if let Ok(order) = serde_json::from_value::<OrderSnapshot>(order_value.clone()) {
-                    orders.insert(order.venue_order_id.clone(), order);
+    // Helper: read order entries from a journal file
+    let read_order_file = |path: &Path, orders: &mut HashMap<String, OrderSnapshot>, processed: &mut HashSet<String>| {
+        if let Ok(file) = File::open(path) {
+            let reader = BufReader::new(file);
+            for line in reader.lines().map_while(Result::ok) {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if let Some(intent_id) = value.get("intent_id").and_then(serde_json::Value::as_str) {
+                    processed.insert(intent_id.to_string());
+                }
+                if let Some(order_value) = value.get("order") {
+                    if let Ok(order) = serde_json::from_value::<OrderSnapshot>(order_value.clone()) {
+                        orders.insert(order.venue_order_id.clone(), order);
+                    }
                 }
             }
         }
-    }
+    };
 
-    let fill_path = journal_path(&data_dir, "fills");
-    if let Ok(file) = File::open(&fill_path) {
-        let reader = BufReader::new(file);
-        let mut fill_ids = HashSet::new();
-        for line in reader.lines().map_while(Result::ok) {
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-
-            if let Some(fill_value) = value.get("fill") {
-                if let Ok(fill) = serde_json::from_value::<FillReport>(fill_value.clone()) {
-                    if fill_ids.insert(fill.venue_fill_id.clone()) {
-                        fills.push(fill);
+    // Helper: read fill entries from a journal file
+    let read_fill_file = |path: &Path, fills: &mut Vec<FillReport>, fill_ids: &mut HashSet<String>| {
+        if let Ok(file) = File::open(path) {
+            let reader = BufReader::new(file);
+            for line in reader.lines().map_while(Result::ok) {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if let Some(fill_value) = value.get("fill") {
+                    if let Ok(fill) = serde_json::from_value::<FillReport>(fill_value.clone()) {
+                        if fill_ids.insert(fill.venue_fill_id.clone()) {
+                            fills.push(fill);
+                        }
                     }
                 }
+            }
+        }
+    };
+
+    // Scan all journal files in the directory (covers multi-day recovery)
+    let mut fill_ids = HashSet::new();
+    if let Ok(entries) = std::fs::read_dir(&journal_dir) {
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().map_or(false, |ext| ext == "jsonl"))
+            .collect();
+        paths.sort();
+
+        for path in &paths {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with("orders-") {
+                read_order_file(path, &mut orders, &mut processed);
+            } else if name.starts_with("fills-") {
+                read_fill_file(path, &mut fills, &mut fill_ids);
             }
         }
     }
@@ -708,10 +736,39 @@ async fn recover_from_todays_journals(state: &Arc<Mutex<EngineState>>) {
         state.fills.extend(fills);
         state.processed_intents.extend(processed);
         info!(
-            "Recovered state from journal: {} orders, {} fills",
+            "Recovered state from journals: {} orders, {} fills",
             state.orders.len(),
             state.fills.len()
         );
+    }
+}
+
+fn cleanup_old_journals(data_dir: &str, max_age_days: u64) {
+    let journal_dir = Path::new(data_dir).join("journal");
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(max_age_days * 86400))
+        .unwrap_or(UNIX_EPOCH);
+
+    let entries = match std::fs::read_dir(&journal_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().map_or(true, |ext| ext != "jsonl") {
+            continue;
+        }
+        let modified = match entry.metadata().and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if modified < cutoff {
+            info!("Removing old journal file: {}", path.display());
+            if let Err(err) = std::fs::remove_file(&path) {
+                warn!("Failed to remove old journal {}: {}", path.display(), err);
+            }
+        }
     }
 }
 
@@ -1675,7 +1732,13 @@ async fn process_execution_request(
             }
 
             let (mode, running, paused, requested_notional_cents, risk_snapshot, safety_policy) = {
-                let state = context.state.lock().await;
+                let mut state = context.state.lock().await;
+                // Auto-reset the per-minute order rate counter every 60 seconds
+                let now = now_ms();
+                if now.saturating_sub(state.last_orders_reset_ms) >= 60_000 {
+                    state.risk_snapshot.orders_last_minute = 0;
+                    state.last_orders_reset_ms = now;
+                }
                 (
                     state.mode,
                     state.running,
@@ -1928,9 +1991,41 @@ async fn process_execution_request(
             }
 
             let mut state = context.state.lock().await;
-            if let Some(existing) = state.orders.get_mut(&payload.venue_order_id) {
+            // Extract info and update order status first, then adjust risk counters
+            let cancel_info = if let Some(existing) = state.orders.get_mut(&payload.venue_order_id) {
                 existing.status = OrderStatus::Canceled;
                 existing.updated_at_ms = now_ms();
+
+                let notional = existing.limit_price
+                    .map(|p| (p * existing.qty * 100.0) as i64)
+                    .unwrap_or(0);
+                Some((
+                    notional,
+                    existing.venue.clone(),
+                    existing.instrument.asset_class.clone(),
+                    existing.strategy_id.clone(),
+                ))
+            } else {
+                None
+            };
+
+            // Decrement risk notional counters so cancelled orders free capacity
+            if let Some((notional, venue, asset_class, strategy_id)) = cancel_info {
+                if notional > 0 {
+                    state.risk_snapshot.total_notional_cents = state
+                        .risk_snapshot
+                        .total_notional_cents
+                        .saturating_sub(notional);
+                    if let Some(v) = state.risk_snapshot.venue_notional.get_mut(&venue) {
+                        *v = v.saturating_sub(notional);
+                    }
+                    if let Some(v) = state.risk_snapshot.asset_class_notional.get_mut(&asset_class) {
+                        *v = v.saturating_sub(notional);
+                    }
+                    if let Some(v) = state.risk_snapshot.strategy_canary_notional.get_mut(&strategy_id) {
+                        *v = v.saturating_sub(notional);
+                    }
+                }
             }
             state.execution_stats.canceled = state.execution_stats.canceled.saturating_add(1);
             persist_engine_state(&state);

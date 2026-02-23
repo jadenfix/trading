@@ -236,6 +236,7 @@ impl ExchangeAdapter for PaperExchangeAdapter {
 
             Self::update_position_after_fill(position, &req.side, req.qty, fill_price);
 
+
             Ok(OrderAck {
                 venue_order_id,
                 client_order_id: req.client_order_id,

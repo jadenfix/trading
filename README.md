@@ -23,7 +23,14 @@ This repo now includes a low-latency Rust bridge for OpenClaw trade control over
 - `crates/trading_daemon`: Rust daemon exposing the UDS control endpoint (`/var/run/openclaw/trading.sock`)
 - `crates/trading_protocol`: shared framing + envelope protocol
 - `crates/tradingctl`: CLI client for ping/start/stop/status checks
-- `.openclaw/extensions/trading-bridge`: OpenClaw tool bridge exposing the unified `trading_hft` control-plane tool
+- `.openclaw/extensions/trading-bridge`: OpenClaw tool bridge exposing the unified `trading_hft` multi-asset tool surface
+
+Bridge runtime behavior:
+
+- live routing: Coinbase Advanced Trade spot (`coinbase_at`)
+- paper routing: perps/options/unsupported instruments via deterministic paper adapter
+- default engine mode: `auto_live` (requires Coinbase credentials)
+- durable file state/journal root: `${TRADING_DATA_DIR:-/var/lib/openclaw/trading}`
 
 Run it with:
 
@@ -84,6 +91,11 @@ export OPENAI_API_KEY="your-openai-key"
 export ANTHROPIC_API_KEY="your-anthropic-key"
 export SPORTS_DATA_IO_API_KEY="your-sportsdataio-key"
 export THE_ODDS_API_KEY="your-theodds-key"
+export COINBASE_API_KEY="your-coinbase-key"
+export COINBASE_API_SECRET="your-coinbase-secret"
+export COINBASE_API_PASSPHRASE="optional-passphrase"
+export TRADING_ENGINE_MODE="auto_live"   # paper | hitl_live | auto_live
+export TRADING_DATA_DIR="/var/lib/openclaw/trading"
 ```
 
 Control token (recommended):

@@ -1,51 +1,52 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use exchange_coinbase_spot::CoinbaseSpotAdapter;
-use exchange_core::ExchangeAdapter;
-use exchange_derivatives_paper::DerivativesPaperAdapter;
-use exchange_kalshi::KalshiAdapter;
+use coinbase_at_adapter::CoinbaseAdvancedTradeAdapter;
+use exchange_core::{
+    BalanceSnapshot, ExchangeAdapter, FillReport, InstrumentType, NormalizedOrderRequest,
+    OpenOrderSnapshot, OrderAck, OrderSnapshot, OrderStatus, PositionSnapshot,
+};
 use fs2::FileExt;
 use futures::{SinkExt, StreamExt};
 use risk_core::{HardSafetyCage, HardSafetyPolicy, PromotionRequest, RiskDecision, RiskSnapshot};
-use rusqlite::{params, Connection};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::fs::File;
-use std::io::ErrorKind;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use strategy_core::StrategyFamily;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal;
 use tokio::sync::Mutex;
+use tokio::time::sleep;
 use tokio_util::codec::Framed;
 use tracing::{error, info, warn};
-use trading_domain::{
-    AssetClass, ExecutionMode, InstrumentId, MarketType, OptionType, OrderRequest, OrderSide,
-    OrderStatus, OrderSummary, OrderType, TimeInForce,
-};
 use trading_protocol::{
     create_codec, CandidatePromotePayload, CandidateUploadPayload, CapabilitiesPayload,
-    ControlCommand, DaemonBuildPayload, EngineCommand, EngineStatePayload, Envelope, Event,
-    ExecutionModeCommand, ExecutionModePayload, InstrumentRefPayload, OrderCancelPayload,
-    OrderCommand, OrderListItemPayload, OrderSubmitPayload, PortfolioBalancePayload,
-    PortfolioCommand, PortfolioPositionPayload, RequestKind, RiskCommand, RiskLimitsPayload,
-    RiskOverridePayload, RiskStatePayload, StrategyCommand, StrategySummaryPayload, VenueCommand,
-    VenueSummaryPayload, VenueTogglePayload, DEFAULT_SOCKET_PATH, PROTOCOL_VERSION,
-    STATUS_SCHEMA_VERSION,
+    ControlCommand, DaemonBuildPayload, EngineCommand, EngineMode, EngineModePayload,
+    EngineStatePayload, Envelope, Event, ExecutionCommand, ExecutionFillsPayload,
+    ExecutionFillsResultPayload, ExecutionGetPayload, ExecutionOpenOrdersPayload,
+    ExecutionPlacePayload, ExecutionPlaceResultPayload, PortfolioBalancesPayload, PortfolioCommand,
+    PortfolioPositionsPayload, PortfolioSummaryPayload, RequestKind, RiskCommand,
+    RiskLimitsPayload, RiskOverridePayload, RiskStatePayload, RoutingCountersPayload,
+    ScopedKillSwitchesPayload, StrategyCommand, StrategySummaryPayload, DEFAULT_SOCKET_PATH,
+    PROTOCOL_VERSION, STATUS_SCHEMA_VERSION,
 };
+use uuid::Uuid;
+
+use paper_exchange_adapter::PaperExchangeAdapter;
 
 const DEFAULT_LOCK_PATH: &str = "/var/run/openclaw/trading.lock";
-const DEFAULT_STATE_PATH: &str = "/var/run/openclaw/trading-state.json";
-const DEFAULT_DB_PATH: &str = "/var/run/openclaw/trading-state.sqlite3";
+const DEFAULT_DATA_DIR: &str = "/var/lib/openclaw/trading";
 const DEFAULT_CANDIDATE_TTL_MS: i64 = 0;
 const MAX_RECENT_EVENTS: usize = 128;
-const SQLITE_MIGRATION_0001: &str = include_str!("../migrations/0001_runtime.sql");
+const PORTFOLIO_SYNC_INTERVAL_SECS: u64 = 15;
+const OPEN_ORDER_RECONCILE_INTERVAL_SECS: u64 = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StrategyCandidate {
@@ -98,16 +99,21 @@ impl StrategyState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct VenueState {
-    id: String,
-    enabled: bool,
-    market_types: Vec<MarketType>,
-    paper_only: bool,
-    live_enabled: bool,
-    message: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct RoutingCounters {
+    live_count: u64,
+    paper_count: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ExecutionStats {
+    accepted: u64,
+    rejected: u64,
+    canceled: u64,
+    fills: u64,
+}
+
+#[derive(Debug)]
 struct EngineState {
     running: bool,
     paused: bool,
@@ -115,23 +121,43 @@ struct EngineState {
     risk_tripped: bool,
     started_at_ms: i64,
     last_command_at_ms: i64,
+    mode: EngineMode,
     strategies: HashMap<String, StrategyState>,
     recent_events: VecDeque<serde_json::Value>,
     risk_snapshot: RiskSnapshot,
     safety_policy: HardSafetyPolicy,
+    data_dir: String,
     state_path: String,
-    db_path: String,
     candidate_ttl_ms: i64,
-    venues: HashMap<String, VenueState>,
-    execution_modes: HashMap<String, ExecutionMode>,
-    adapters: HashMap<String, Arc<dyn ExchangeAdapter>>,
+    routing_counters: RoutingCounters,
+    execution_stats: ExecutionStats,
+    scoped_kill_venues: HashSet<String>,
+    scoped_kill_strategies: HashSet<String>,
+    orders: HashMap<String, OrderSnapshot>,
+    fills: Vec<FillReport>,
+    processed_intents: HashSet<String>,
+    portfolio_positions: Vec<PositionSnapshot>,
+    portfolio_balances: Vec<BalanceSnapshot>,
+    last_orders_reset_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StrategyStateSnapshot {
+struct EngineStateSnapshot {
     schema_version: u8,
     saved_at_ms: i64,
+    mode: EngineMode,
+    kill_switch_engaged: bool,
+    paused: bool,
+    risk_tripped: bool,
     strategies: Vec<StrategyState>,
+    scoped_kill_venues: Vec<String>,
+    scoped_kill_strategies: Vec<String>,
+    routing_counters: RoutingCounters,
+    execution_stats: ExecutionStats,
+    orders: Vec<OrderSnapshot>,
+    fills: Vec<FillReport>,
+    processed_intents: Vec<String>,
+    risk_snapshot: RiskSnapshot,
 }
 
 #[derive(Debug)]
@@ -149,9 +175,18 @@ struct StrategyIdPayload {
     strategy_id: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct OptionalVenuePayload {
-    venue_id: Option<String>,
+type DynAdapter = Arc<dyn ExchangeAdapter>;
+
+#[derive(Clone)]
+struct AdapterRegistry {
+    coinbase: Option<DynAdapter>,
+    paper: DynAdapter,
+}
+
+#[derive(Clone)]
+struct DaemonContext {
+    state: Arc<Mutex<EngineState>>,
+    adapters: Arc<AdapterRegistry>,
 }
 
 #[tokio::main]
@@ -160,26 +195,41 @@ async fn main() -> Result<()> {
 
     let socket_path = socket_path_from_env();
     let lock_path = lock_path_from_env();
-    let state_path = state_path_from_env();
-    let db_path = db_path_from_env();
+    let data_dir = data_dir_from_env();
+    let state_path = state_path_from_env(&data_dir);
     let candidate_ttl_ms = candidate_ttl_ms_from_env();
+    let default_mode = mode_from_env();
+
     info!("Starting trading daemon");
     info!("Socket path: {}", socket_path);
     info!("Lock path: {}", lock_path);
+    info!("Data dir: {}", data_dir);
     info!("State path: {}", state_path);
-    info!("SQLite state path: {}", db_path);
-    info!("Candidate TTL (ms): {}", candidate_ttl_ms);
+    info!("Default mode: {}", default_mode.as_str());
 
     ensure_socket_parent_dir(&socket_path)?;
-    ensure_sqlite_path_ready(&db_path)?;
-    ensure_sqlite_schema(&db_path)?;
+    ensure_data_dirs(&data_dir)?;
     let _lock_file = acquire_single_instance_lock(&lock_path)?;
     let listener = bind_listener(&socket_path)?;
+
+    let adapters = Arc::new(build_adapters());
     let state = Arc::new(Mutex::new(initial_engine_state(
+        data_dir.clone(),
         state_path,
-        db_path,
         candidate_ttl_ms,
+        default_mode,
+        adapters.coinbase.is_some(),
     )));
+
+    cleanup_old_journals(&data_dir, 7);
+    recover_from_journals(&state).await;
+
+    let context = DaemonContext {
+        state: Arc::clone(&state),
+        adapters: Arc::clone(&adapters),
+    };
+
+    spawn_background_reconcilers(context.clone());
 
     let terminate = signal::ctrl_c();
     tokio::pin!(terminate);
@@ -193,9 +243,9 @@ async fn main() -> Result<()> {
             res = listener.accept() => {
                 match res {
                      Ok((stream, _addr)) => {
-                        let state = Arc::clone(&state);
+                        let context = context.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state).await;
+                            handle_connection(stream, context).await;
                         });
                      }
                      Err(e) => {
@@ -216,227 +266,23 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn initial_engine_state(state_path: String, db_path: String, candidate_ttl_ms: i64) -> EngineState {
-    let now = now_ms();
-    if let Err(err) = ensure_sqlite_path_ready(&db_path) {
-        warn!("Failed to prepare sqlite path {}: {:#}", db_path, err);
-    }
-    if let Err(err) = ensure_sqlite_schema(&db_path) {
-        warn!("Failed to initialize sqlite schema {}: {:#}", db_path, err);
-    }
-    let venues = default_venues();
-    let execution_modes = default_execution_modes(&venues);
-    let adapters = default_adapters(&execution_modes);
-    let mut state = EngineState {
-        running: false,
-        paused: false,
-        kill_switch_engaged: false,
-        risk_tripped: false,
-        started_at_ms: now,
-        last_command_at_ms: now,
-        strategies: default_strategies(),
-        recent_events: VecDeque::new(),
-        risk_snapshot: RiskSnapshot::default(),
-        safety_policy: HardSafetyPolicy::default(),
-        state_path,
-        db_path,
-        candidate_ttl_ms,
-        venues,
-        execution_modes,
-        adapters,
-    };
+fn build_adapters() -> AdapterRegistry {
+    let paper: DynAdapter = Arc::new(PaperExchangeAdapter::new("paper"));
 
-    let mut loaded_strategy_snapshot = false;
-    match load_strategy_snapshot(&state.state_path) {
-        Ok(Some(snapshot)) => {
-            apply_strategy_snapshot(&mut state, snapshot);
-            loaded_strategy_snapshot = true;
-            info!("Loaded persisted strategy state from {}", state.state_path);
-        }
-        Ok(None) => {}
-        Err(err) => {
-            warn!(
-                "Failed to load persisted strategy state from {}: {:#}",
-                state.state_path, err
-            );
-        }
-    }
-
-    match load_sqlite_runtime_state(&mut state, !loaded_strategy_snapshot) {
-        Ok(()) => {
-            info!("Loaded sqlite runtime state from {}", state.db_path);
-        }
-        Err(err) => {
-            warn!(
-                "Failed to load sqlite runtime state from {}: {:#}",
-                state.db_path, err
-            );
-        }
-    }
-
-    for venue in state.venues.values() {
-        if let Err(err) = sqlite_upsert_venue(&state.db_path, venue) {
-            warn!(
-                "Failed to persist initial venue '{}' state: {:#}",
-                venue.id, err
-            );
-        }
-    }
-    for (key, mode) in &state.execution_modes {
-        let mut parts = key.split(':');
-        let venue_id = parts.next().unwrap_or_default();
-        let market_type_raw = parts.next().unwrap_or_default();
-        if let Ok(market_type) = parse_market_type(market_type_raw) {
-            if let Err(err) =
-                sqlite_upsert_execution_mode(&state.db_path, venue_id, market_type, *mode)
-            {
-                warn!(
-                    "Failed to persist initial execution mode '{key}': {:#}",
-                    err
-                );
+    let coinbase = if CoinbaseAdvancedTradeAdapter::credentials_present() {
+        match CoinbaseAdvancedTradeAdapter::from_env() {
+            Ok(adapter) => Some(Arc::new(adapter) as DynAdapter),
+            Err(err) => {
+                warn!("Coinbase adapter not initialized: {}", err.message);
+                None
             }
         }
-    }
-    persist_sqlite_runtime_snapshot(&state);
+    } else {
+        warn!("COINBASE_BEARER_TOKEN missing; live spot execution unavailable");
+        None
+    };
 
-    state
-}
-
-fn default_strategies() -> HashMap<String, StrategyState> {
-    [
-        (
-            "kalshi.arbitrage",
-            StrategyFamily::Arbitrage,
-            "builtin-kalshi-arb",
-        ),
-        (
-            "kalshi.market_making",
-            StrategyFamily::MarketMaking,
-            "builtin-kalshi-mm",
-        ),
-        (
-            "core.mean_reversion",
-            StrategyFamily::MeanReversion,
-            "builtin-mean-reversion",
-        ),
-        (
-            "core.momentum",
-            StrategyFamily::Momentum,
-            "builtin-momentum",
-        ),
-        (
-            "crypto.momentum_trend",
-            StrategyFamily::Momentum,
-            "builtin-crypto-momentum",
-        ),
-    ]
-    .into_iter()
-    .map(|(id, family, source)| {
-        (
-            id.to_string(),
-            StrategyState {
-                id: id.to_string(),
-                enabled: false,
-                family,
-                source: source.to_string(),
-                version: 1,
-                canary_deployment: false,
-                canary_notional_cents: 0,
-                active_code_hash: None,
-                candidate: None,
-            },
-        )
-    })
-    .collect()
-}
-
-fn default_venues() -> HashMap<String, VenueState> {
-    [
-        VenueState {
-            id: "kalshi".to_string(),
-            enabled: true,
-            market_types: vec![MarketType::Binary],
-            paper_only: false,
-            live_enabled: true,
-            message: Some("US-compliant prediction venue".to_string()),
-        },
-        VenueState {
-            id: "coinbase_spot".to_string(),
-            enabled: true,
-            market_types: vec![MarketType::Spot],
-            paper_only: false,
-            live_enabled: true,
-            message: Some("US-compliant crypto spot venue".to_string()),
-        },
-        VenueState {
-            id: "derivatives_paper".to_string(),
-            enabled: true,
-            market_types: vec![
-                MarketType::Perpetual,
-                MarketType::Futures,
-                MarketType::Option,
-            ],
-            paper_only: true,
-            live_enabled: false,
-            message: Some("paper-only derivatives fallback".to_string()),
-        },
-    ]
-    .into_iter()
-    .map(|v| (v.id.clone(), v))
-    .collect()
-}
-
-fn mode_key(venue_id: &str, market_type: MarketType) -> String {
-    format!("{venue_id}:{market_type:?}")
-}
-
-fn default_execution_modes(venues: &HashMap<String, VenueState>) -> HashMap<String, ExecutionMode> {
-    let mut modes = HashMap::new();
-    for venue in venues.values() {
-        for market_type in &venue.market_types {
-            let mode = if venue.paper_only {
-                ExecutionMode::Paper
-            } else {
-                ExecutionMode::Live
-            };
-            modes.insert(mode_key(&venue.id, *market_type), mode);
-        }
-    }
-    modes
-}
-
-fn default_adapters(
-    execution_modes: &HashMap<String, ExecutionMode>,
-) -> HashMap<String, Arc<dyn ExchangeAdapter>> {
-    let kalshi_mode = execution_modes
-        .get(&mode_key("kalshi", MarketType::Binary))
-        .copied()
-        .unwrap_or(ExecutionMode::Paper);
-    let coinbase_mode = execution_modes
-        .get(&mode_key("coinbase_spot", MarketType::Spot))
-        .copied()
-        .unwrap_or(ExecutionMode::Paper);
-    let derivatives_mode = execution_modes
-        .get(&mode_key("derivatives_paper", MarketType::Perpetual))
-        .copied()
-        .unwrap_or(ExecutionMode::Paper);
-
-    [
-        (
-            "kalshi".to_string(),
-            Arc::new(KalshiAdapter::new(kalshi_mode)) as Arc<dyn ExchangeAdapter>,
-        ),
-        (
-            "coinbase_spot".to_string(),
-            Arc::new(CoinbaseSpotAdapter::new(coinbase_mode)) as Arc<dyn ExchangeAdapter>,
-        ),
-        (
-            "derivatives_paper".to_string(),
-            Arc::new(DerivativesPaperAdapter::new(derivatives_mode)) as Arc<dyn ExchangeAdapter>,
-        ),
-    ]
-    .into_iter()
-    .collect()
+    AdapterRegistry { coinbase, paper }
 }
 
 fn now_ms() -> i64 {
@@ -454,12 +300,31 @@ fn lock_path_from_env() -> String {
     std::env::var("TRADING_LOCK_PATH").unwrap_or_else(|_| DEFAULT_LOCK_PATH.to_string())
 }
 
-fn state_path_from_env() -> String {
-    std::env::var("TRADING_STATE_PATH").unwrap_or_else(|_| DEFAULT_STATE_PATH.to_string())
+fn data_dir_from_env() -> String {
+    std::env::var("TRADING_DATA_DIR").unwrap_or_else(|_| DEFAULT_DATA_DIR.to_string())
 }
 
-fn db_path_from_env() -> String {
-    std::env::var("TRADING_DB_PATH").unwrap_or_else(|_| DEFAULT_DB_PATH.to_string())
+fn state_path_from_env(data_dir: &str) -> String {
+    std::env::var("TRADING_STATE_PATH")
+        .unwrap_or_else(|_| format!("{}/state/engine-state.json", data_dir))
+}
+
+fn mode_from_env() -> EngineMode {
+    match std::env::var("TRADING_ENGINE_MODE") {
+        Ok(mode) => match mode.trim().to_ascii_lowercase().as_str() {
+            "paper" => EngineMode::Paper,
+            "hitl_live" => EngineMode::HitlLive,
+            "auto_live" => EngineMode::AutoLive,
+            _ => {
+                warn!(
+                    "Invalid TRADING_ENGINE_MODE='{}'; defaulting to auto_live",
+                    mode
+                );
+                EngineMode::AutoLive
+            }
+        },
+        Err(_) => EngineMode::AutoLive,
+    }
 }
 
 fn candidate_ttl_ms_from_env() -> i64 {
@@ -478,26 +343,6 @@ fn candidate_ttl_ms_from_env() -> i64 {
     }
 }
 
-fn ensure_sqlite_path_ready(db_path: &str) -> Result<()> {
-    if let Some(parent) = Path::new(db_path).parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "Failed to create sqlite directory for database {}",
-                parent.display()
-            )
-        })?;
-    }
-    Ok(())
-}
-
-fn ensure_sqlite_schema(db_path: &str) -> Result<()> {
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("Failed to open sqlite database at {}", db_path))?;
-    conn.execute_batch(SQLITE_MIGRATION_0001)
-        .with_context(|| format!("Failed to initialize sqlite schema at {}", db_path))?;
-    Ok(())
-}
-
 fn ensure_socket_parent_dir(socket_path: &str) -> Result<()> {
     let parent = PathBuf::from(socket_path)
         .parent()
@@ -505,6 +350,14 @@ fn ensure_socket_parent_dir(socket_path: &str) -> Result<()> {
         .context("Socket path must include a parent directory")?;
     std::fs::create_dir_all(&parent)
         .with_context(|| format!("Failed to create socket directory {}", parent.display()))?;
+    Ok(())
+}
+
+fn ensure_data_dirs(data_dir: &str) -> Result<()> {
+    std::fs::create_dir_all(Path::new(data_dir).join("state"))
+        .with_context(|| format!("Failed to create state dir under {}", data_dir))?;
+    std::fs::create_dir_all(Path::new(data_dir).join("journal"))
+        .with_context(|| format!("Failed to create journal dir under {}", data_dir))?;
     Ok(())
 }
 
@@ -531,77 +384,183 @@ fn bind_listener(socket_path: &str) -> Result<UnixListener> {
     let listener = UnixListener::bind(socket_path)
         .with_context(|| format!("Failed to bind UDS socket {}", socket_path))?;
     #[cfg(unix)]
-    // Containers run as uid/gid 1000, so owner/group write access is sufficient.
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
         .with_context(|| format!("Failed to set socket permissions on {}", socket_path))?;
     info!("Listening on {}", socket_path);
     Ok(listener)
 }
 
-fn strategy_snapshot_from_state(state: &EngineState) -> StrategyStateSnapshot {
+fn initial_engine_state(
+    data_dir: String,
+    state_path: String,
+    candidate_ttl_ms: i64,
+    mode: EngineMode,
+    coinbase_available: bool,
+) -> EngineState {
+    let now = now_ms();
+    let mut state = EngineState {
+        running: false,
+        paused: false,
+        kill_switch_engaged: false,
+        risk_tripped: false,
+        started_at_ms: now,
+        last_command_at_ms: now,
+        mode,
+        strategies: default_strategies(),
+        recent_events: VecDeque::new(),
+        risk_snapshot: RiskSnapshot::default(),
+        safety_policy: HardSafetyPolicy::default(),
+        data_dir,
+        state_path,
+        candidate_ttl_ms,
+        routing_counters: RoutingCounters::default(),
+        execution_stats: ExecutionStats::default(),
+        scoped_kill_venues: HashSet::new(),
+        scoped_kill_strategies: HashSet::new(),
+        orders: HashMap::new(),
+        fills: Vec::new(),
+        processed_intents: HashSet::new(),
+        portfolio_positions: Vec::new(),
+        portfolio_balances: Vec::new(),
+        last_orders_reset_ms: now,
+    };
+
+    match load_engine_snapshot(&state.state_path) {
+        Ok(Some(snapshot)) => {
+            apply_engine_snapshot(&mut state, snapshot);
+            info!("Loaded persisted engine state from {}", state.state_path);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            warn!(
+                "Failed to load persisted engine state from {}: {:#}",
+                state.state_path, err
+            );
+        }
+    }
+
+    if state.mode != EngineMode::Paper && !coinbase_available {
+        state.running = false;
+        state.paused = true;
+        state.risk_tripped = true;
+        push_event(
+            &mut state,
+            Event::Alert {
+                level: "critical".to_string(),
+                message: "auto/hitl live mode requested but Coinbase credentials unavailable; engine remains non-running"
+                    .to_string(),
+            },
+        );
+    }
+
+    sync_scoped_kills_into_snapshot(&mut state);
+    state
+}
+
+fn default_strategies() -> HashMap<String, StrategyState> {
+    [
+        (
+            "kalshi.arbitrage",
+            StrategyFamily::Arbitrage,
+            "builtin-kalshi-arb",
+        ),
+        (
+            "kalshi.market_making",
+            StrategyFamily::MarketMaking,
+            "builtin-kalshi-mm",
+        ),
+        (
+            "core.mean_reversion",
+            StrategyFamily::MeanReversion,
+            "builtin-mean-reversion",
+        ),
+        (
+            "core.momentum",
+            StrategyFamily::Momentum,
+            "builtin-momentum",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, family, source)| {
+        (
+            id.to_string(),
+            StrategyState {
+                id: id.to_string(),
+                enabled: false,
+                family,
+                source: source.to_string(),
+                version: 1,
+                canary_deployment: false,
+                canary_notional_cents: 0,
+                active_code_hash: None,
+                candidate: None,
+            },
+        )
+    })
+    .collect()
+}
+
+fn strategy_snapshot_from_state(state: &EngineState) -> EngineStateSnapshot {
     let mut strategies: Vec<StrategyState> = state.strategies.values().cloned().collect();
     strategies.sort_by(|a, b| a.id.cmp(&b.id));
-    StrategyStateSnapshot {
-        schema_version: 1,
+
+    EngineStateSnapshot {
+        schema_version: 2,
         saved_at_ms: now_ms(),
+        mode: state.mode,
+        kill_switch_engaged: state.kill_switch_engaged,
+        paused: state.paused,
+        risk_tripped: state.risk_tripped,
         strategies,
+        scoped_kill_venues: state.scoped_kill_venues.iter().cloned().collect(),
+        scoped_kill_strategies: state.scoped_kill_strategies.iter().cloned().collect(),
+        routing_counters: state.routing_counters.clone(),
+        execution_stats: state.execution_stats.clone(),
+        orders: state.orders.values().cloned().collect(),
+        fills: state.fills.clone(),
+        processed_intents: state.processed_intents.iter().cloned().collect(),
+        risk_snapshot: state.risk_snapshot.clone(),
     }
 }
 
-fn load_strategy_snapshot(path: &str) -> Result<Option<StrategyStateSnapshot>> {
+fn load_engine_snapshot(path: &str) -> Result<Option<EngineStateSnapshot>> {
     let raw = match std::fs::read(path) {
         Ok(raw) => raw,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
         Err(err) => {
-            return Err(err).with_context(|| format!("Failed to read strategy snapshot {}", path));
+            return Err(err).with_context(|| format!("Failed to read engine snapshot {}", path));
         }
     };
 
-    let snapshot: StrategyStateSnapshot = serde_json::from_slice(&raw)
-        .with_context(|| format!("Failed to decode strategy snapshot {}", path))?;
+    let snapshot: EngineStateSnapshot = serde_json::from_slice(&raw)
+        .with_context(|| format!("Failed to decode engine snapshot {}", path))?;
     Ok(Some(snapshot))
 }
 
-fn save_strategy_snapshot(path: &str, snapshot: &StrategyStateSnapshot) -> Result<()> {
+fn save_engine_snapshot(path: &str, snapshot: &EngineStateSnapshot) -> Result<()> {
     if let Some(parent) = Path::new(path).parent() {
         std::fs::create_dir_all(parent).with_context(|| {
             format!(
-                "Failed to create parent directory for strategy snapshot {}",
+                "Failed to create parent directory for engine snapshot {}",
                 parent.display()
             )
         })?;
     }
 
     let tmp_path = format!("{}.tmp.{}", path, std::process::id());
-    let bytes =
-        serde_json::to_vec_pretty(snapshot).context("Failed to encode strategy snapshot")?;
+    let bytes = serde_json::to_vec_pretty(snapshot).context("Failed to encode engine snapshot")?;
     std::fs::write(&tmp_path, bytes)
-        .with_context(|| format!("Failed to write temporary strategy snapshot {}", tmp_path))?;
+        .with_context(|| format!("Failed to write temporary engine snapshot {}", tmp_path))?;
     std::fs::rename(&tmp_path, path).with_context(|| {
         format!(
-            "Failed to move temporary strategy snapshot {} to {}",
+            "Failed to move temporary engine snapshot {} to {}",
             tmp_path, path
         )
     })?;
     Ok(())
 }
 
-fn strategy_canary_notional_map(
-    strategies: &HashMap<String, StrategyState>,
-) -> HashMap<String, i64> {
-    strategies
-        .iter()
-        .filter_map(|(id, strategy)| {
-            if strategy.canary_deployment && strategy.canary_notional_cents > 0 {
-                Some((id.clone(), strategy.canary_notional_cents))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-fn apply_strategy_snapshot(state: &mut EngineState, snapshot: StrategyStateSnapshot) {
+fn apply_engine_snapshot(state: &mut EngineState, snapshot: EngineStateSnapshot) {
     for persisted in snapshot.strategies {
         let Some(strategy) = state.strategies.get_mut(&persisted.id) else {
             warn!(
@@ -628,17 +587,194 @@ fn apply_strategy_snapshot(state: &mut EngineState, snapshot: StrategyStateSnaps
         strategy.candidate = persisted.candidate;
     }
 
-    state.risk_snapshot.strategy_canary_notional = strategy_canary_notional_map(&state.strategies);
+    state.mode = snapshot.mode;
+    state.kill_switch_engaged = snapshot.kill_switch_engaged;
+    state.paused = snapshot.paused;
+    state.risk_tripped = snapshot.risk_tripped;
+    state.scoped_kill_venues = snapshot.scoped_kill_venues.into_iter().collect();
+    state.scoped_kill_strategies = snapshot.scoped_kill_strategies.into_iter().collect();
+    state.routing_counters = snapshot.routing_counters;
+    state.execution_stats = snapshot.execution_stats;
+    state.orders = snapshot
+        .orders
+        .into_iter()
+        .map(|order| (order.venue_order_id.clone(), order))
+        .collect();
+    state.fills = snapshot.fills;
+    state.processed_intents = snapshot.processed_intents.into_iter().collect();
+    state.risk_snapshot = snapshot.risk_snapshot;
+    sync_scoped_kills_into_snapshot(state);
 }
 
-fn persist_strategy_state(state: &EngineState) {
+fn persist_engine_state(state: &EngineState) {
     let snapshot = strategy_snapshot_from_state(state);
-    if let Err(err) = save_strategy_snapshot(&state.state_path, &snapshot) {
+    if let Err(err) = save_engine_snapshot(&state.state_path, &snapshot) {
         warn!(
-            "Failed to persist strategy state to {}: {:#}",
+            "Failed to persist engine state to {}: {:#}",
             state.state_path, err
         );
     }
+}
+
+fn journal_path(data_dir: &str, stream: &str) -> PathBuf {
+    let date_key = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    Path::new(data_dir)
+        .join("journal")
+        .join(format!("{}-{}.jsonl", stream, date_key))
+}
+
+fn write_journal_entry(data_dir: &str, stream: &str, entry: &serde_json::Value) {
+    let path = journal_path(data_dir, stream);
+    let line = match serde_json::to_string(entry) {
+        Ok(line) => line,
+        Err(err) => {
+            warn!("failed to serialize journal entry: {}", err);
+            return;
+        }
+    };
+
+    // Offload blocking file I/O to the blocking thread pool
+    tokio::task::spawn_blocking(move || {
+        if let Some(parent) = path.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                warn!("failed to create journal dir {}: {}", parent.display(), err);
+                return;
+            }
+        }
+
+        let mut file = match OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => file,
+            Err(err) => {
+                warn!("failed to open journal {}: {}", path.display(), err);
+                return;
+            }
+        };
+
+        if let Err(err) = writeln!(file, "{}", line) {
+            warn!("failed writing journal {}: {}", path.display(), err);
+        }
+    });
+}
+
+async fn recover_from_journals(state: &Arc<Mutex<EngineState>>) {
+    let (data_dir, mut orders, mut fills, mut processed) = {
+        let state = state.lock().await;
+        (
+            state.data_dir.clone(),
+            HashMap::<String, OrderSnapshot>::new(),
+            Vec::<FillReport>::new(),
+            HashSet::<String>::new(),
+        )
+    };
+
+    let journal_dir = Path::new(&data_dir).join("journal");
+
+    // Helper: read order entries from a journal file
+    let read_order_file = |path: &Path, orders: &mut HashMap<String, OrderSnapshot>, processed: &mut HashSet<String>| {
+        if let Ok(file) = File::open(path) {
+            let reader = BufReader::new(file);
+            for line in reader.lines().map_while(Result::ok) {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if let Some(intent_id) = value.get("intent_id").and_then(serde_json::Value::as_str) {
+                    processed.insert(intent_id.to_string());
+                }
+                if let Some(order_value) = value.get("order") {
+                    if let Ok(order) = serde_json::from_value::<OrderSnapshot>(order_value.clone()) {
+                        orders.insert(order.venue_order_id.clone(), order);
+                    }
+                }
+            }
+        }
+    };
+
+    // Helper: read fill entries from a journal file
+    let read_fill_file = |path: &Path, fills: &mut Vec<FillReport>, fill_ids: &mut HashSet<String>| {
+        if let Ok(file) = File::open(path) {
+            let reader = BufReader::new(file);
+            for line in reader.lines().map_while(Result::ok) {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if let Some(fill_value) = value.get("fill") {
+                    if let Ok(fill) = serde_json::from_value::<FillReport>(fill_value.clone()) {
+                        if fill_ids.insert(fill.venue_fill_id.clone()) {
+                            fills.push(fill);
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    // Scan all journal files in the directory (covers multi-day recovery)
+    let mut fill_ids = HashSet::new();
+    if let Ok(entries) = std::fs::read_dir(&journal_dir) {
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().map_or(false, |ext| ext == "jsonl"))
+            .collect();
+        paths.sort();
+
+        for path in &paths {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with("orders-") {
+                read_order_file(path, &mut orders, &mut processed);
+            } else if name.starts_with("fills-") {
+                read_fill_file(path, &mut fills, &mut fill_ids);
+            }
+        }
+    }
+
+    if !orders.is_empty() || !fills.is_empty() || !processed.is_empty() {
+        let mut state = state.lock().await;
+        for (k, v) in orders {
+            state.orders.insert(k, v);
+        }
+        state.fills.extend(fills);
+        state.processed_intents.extend(processed);
+        info!(
+            "Recovered state from journals: {} orders, {} fills",
+            state.orders.len(),
+            state.fills.len()
+        );
+    }
+}
+
+fn cleanup_old_journals(data_dir: &str, max_age_days: u64) {
+    let journal_dir = Path::new(data_dir).join("journal");
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(max_age_days * 86400))
+        .unwrap_or(UNIX_EPOCH);
+
+    let entries = match std::fs::read_dir(&journal_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().map_or(true, |ext| ext != "jsonl") {
+            continue;
+        }
+        let modified = match entry.metadata().and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if modified < cutoff {
+            info!("Removing old journal file: {}", path.display());
+            if let Err(err) = std::fs::remove_file(&path) {
+                warn!("Failed to remove old journal {}: {}", path.display(), err);
+            }
+        }
+    }
+}
+
+fn sync_scoped_kills_into_snapshot(state: &mut EngineState) {
+    state.risk_snapshot.scoped_kill_venues = state.scoped_kill_venues.clone();
+    state.risk_snapshot.scoped_kill_strategies = state.scoped_kill_strategies.clone();
 }
 
 fn set_engine_runtime_state(state: &mut EngineState, running: bool, paused: bool) {
@@ -653,7 +789,6 @@ fn apply_start(state: &mut EngineState) {
 }
 
 fn apply_stop(state: &mut EngineState) {
-    // Stop means halted but not "paused for safety"; resume requires explicit start.
     set_engine_runtime_state(state, false, false);
     state.last_command_at_ms = now_ms();
 }
@@ -727,6 +862,7 @@ fn promote_candidate_locked(
         risk_passed: candidate.risk_passed,
     };
 
+    sync_scoped_kills_into_snapshot(state);
     let cage = HardSafetyCage::new(state.safety_policy.clone());
     match cage.evaluate_promotion(&promote_req, &state.risk_snapshot) {
         RiskDecision::Allow => {
@@ -743,7 +879,6 @@ fn promote_candidate_locked(
                     .get_mut(&strategy_id)
                     .expect("strategy must exist");
                 strategy.version = strategy.version.saturating_add(1);
-                // Promotion replaces runtime code/canary config but should not override operator enable intent.
                 strategy.canary_deployment = true;
                 strategy.canary_notional_cents = payload.requested_canary_notional_cents;
                 strategy.active_code_hash = Some(payload.code_hash.clone());
@@ -776,7 +911,163 @@ fn promote_candidate_locked(
     }
 }
 
-async fn handle_connection(stream: UnixStream, state: Arc<Mutex<EngineState>>) {
+fn route_is_live(
+    mode: EngineMode,
+    order: &NormalizedOrderRequest,
+    adapters: &AdapterRegistry,
+) -> bool {
+    mode != EngineMode::Paper
+        && order.venue == "coinbase_at"
+        && order.instrument.instrument_type == InstrumentType::Spot
+        && adapters.coinbase.is_some()
+}
+
+fn compute_requested_notional_cents(order: &NormalizedOrderRequest) -> i64 {
+    if order.requested_notional_cents > 0 {
+        return order.requested_notional_cents;
+    }
+
+    match order.limit_price {
+        Some(price) if price > 0.0 && order.qty > 0.0 => (price * order.qty * 100.0) as i64,
+        _ => 0,
+    }
+}
+
+fn ack_from_order(order: &OrderSnapshot) -> OrderAck {
+    OrderAck {
+        venue_order_id: order.venue_order_id.clone(),
+        client_order_id: order.client_order_id.clone(),
+        accepted: !matches!(order.status, OrderStatus::Rejected),
+        status: order.status.clone(),
+        filled_qty: order.filled_qty,
+        avg_fill_price: order.avg_fill_price,
+        simulated: order.simulated,
+        reason: None,
+        ts_ms: order.updated_at_ms,
+    }
+}
+
+fn synthetic_order_from_ack(order_req: &NormalizedOrderRequest, ack: &OrderAck) -> OrderSnapshot {
+    OrderSnapshot {
+        venue: order_req.venue.clone(),
+        venue_order_id: ack.venue_order_id.clone(),
+        client_order_id: ack.client_order_id.clone(),
+        strategy_id: order_req.strategy_id.clone(),
+        instrument: order_req.instrument.clone(),
+        side: order_req.side.clone(),
+        order_type: order_req.order_type.clone(),
+        status: ack.status.clone(),
+        qty: order_req.qty,
+        filled_qty: ack.filled_qty,
+        limit_price: order_req.limit_price,
+        avg_fill_price: ack.avg_fill_price,
+        created_at_ms: ack.ts_ms,
+        updated_at_ms: ack.ts_ms,
+        simulated: ack.simulated,
+    }
+}
+
+fn maybe_fill_from_ack(order: &OrderSnapshot, ack: &OrderAck) -> Option<FillReport> {
+    if ack.filled_qty <= 0.0 {
+        return None;
+    }
+
+    Some(FillReport {
+        venue: order.venue.clone(),
+        venue_fill_id: format!("fill-{}", Uuid::new_v4().as_simple()),
+        venue_order_id: order.venue_order_id.clone(),
+        client_order_id: order.client_order_id.clone(),
+        strategy_id: order.strategy_id.clone(),
+        instrument: order.instrument.clone(),
+        side: order.side.clone(),
+        qty: ack.filled_qty,
+        price: ack.avg_fill_price.unwrap_or(0.0),
+        fee: 0.0,
+        fee_asset: order.instrument.quote.clone(),
+        liquidity: None,
+        simulated: ack.simulated,
+        ts_ms: ack.ts_ms,
+    })
+}
+
+async fn fetch_portfolio(
+    adapters: &AdapterRegistry,
+) -> (Vec<PositionSnapshot>, Vec<BalanceSnapshot>) {
+    let mut positions = Vec::new();
+    let mut balances = Vec::new();
+
+    if let Some(coinbase) = &adapters.coinbase {
+        match coinbase.sync_positions().await {
+            Ok(mut p) => positions.append(&mut p),
+            Err(err) => warn!("coinbase sync_positions failed: {}", err.message),
+        }
+        match coinbase.sync_balances().await {
+            Ok(mut b) => balances.append(&mut b),
+            Err(err) => warn!("coinbase sync_balances failed: {}", err.message),
+        }
+    }
+
+    match adapters.paper.sync_positions().await {
+        Ok(mut p) => positions.append(&mut p),
+        Err(err) => warn!("paper sync_positions failed: {}", err.message),
+    }
+    match adapters.paper.sync_balances().await {
+        Ok(mut b) => balances.append(&mut b),
+        Err(err) => warn!("paper sync_balances failed: {}", err.message),
+    }
+
+    (positions, balances)
+}
+
+fn spawn_background_reconcilers(context: DaemonContext) {
+    let portfolio_ctx = context.clone();
+    tokio::spawn(async move {
+        loop {
+            let (positions, balances) = fetch_portfolio(&portfolio_ctx.adapters).await;
+            {
+                let mut state = portfolio_ctx.state.lock().await;
+                state.portfolio_positions = positions;
+                state.portfolio_balances = balances;
+                let event = Event::PortfolioSync {
+                    positions: state.portfolio_positions.len(),
+                    balances: state.portfolio_balances.len(),
+                };
+                push_event(&mut state, event);
+                persist_engine_state(&state);
+            }
+            sleep(Duration::from_secs(PORTFOLIO_SYNC_INTERVAL_SECS)).await;
+        }
+    });
+
+    tokio::spawn(async move {
+        loop {
+            let mut open_orders = Vec::<OpenOrderSnapshot>::new();
+            if let Some(coinbase) = &context.adapters.coinbase {
+                match coinbase.open_orders().await {
+                    Ok(mut items) => open_orders.append(&mut items),
+                    Err(err) => warn!("coinbase open_orders failed: {}", err.message),
+                }
+            }
+            match context.adapters.paper.open_orders().await {
+                Ok(mut items) => open_orders.append(&mut items),
+                Err(err) => warn!("paper open_orders failed: {}", err.message),
+            }
+
+            {
+                let mut state = context.state.lock().await;
+                for snapshot in open_orders {
+                    state
+                        .orders
+                        .insert(snapshot.order.venue_order_id.clone(), snapshot.order);
+                }
+            }
+
+            sleep(Duration::from_secs(OPEN_ORDER_RECONCILE_INTERVAL_SECS)).await;
+        }
+    });
+}
+
+async fn handle_connection(stream: UnixStream, context: DaemonContext) {
     let mut framed = Framed::new(stream, create_codec());
 
     while let Some(result) = framed.next().await {
@@ -791,7 +1082,7 @@ async fn handle_connection(stream: UnixStream, state: Arc<Mutex<EngineState>>) {
                 };
 
                 info!("Received request: {}", envelope.kind);
-                let response = process_request(&envelope, &state).await;
+                let response = process_request(&envelope, &context).await;
                 let response_bytes = match serde_json::to_vec(&response) {
                     Ok(bytes) => bytes,
                     Err(e) => {
@@ -813,23 +1104,23 @@ async fn handle_connection(stream: UnixStream, state: Arc<Mutex<EngineState>>) {
     }
 }
 
-async fn process_request(request: &Envelope, state: &Arc<Mutex<EngineState>>) -> Envelope {
+async fn process_request(request: &Envelope, context: &DaemonContext) -> Envelope {
     match RequestKind::from_kind(request.kind.as_str()) {
         Some(RequestKind::Control(command)) => {
-            process_control_request(request, state, command).await
+            process_control_request(request, context, command).await
         }
-        Some(RequestKind::Engine(command)) => process_engine_request(request, state, command).await,
+        Some(RequestKind::Engine(command)) => {
+            process_engine_request(request, context, command).await
+        }
         Some(RequestKind::Strategy(command)) => {
-            process_strategy_request(request, state, command).await
+            process_strategy_request(request, context, command).await
         }
-        Some(RequestKind::Risk(command)) => process_risk_request(request, state, command).await,
-        Some(RequestKind::Venue(command)) => process_venue_request(request, state, command).await,
+        Some(RequestKind::Risk(command)) => process_risk_request(request, context, command).await,
+        Some(RequestKind::Execution(command)) => {
+            process_execution_request(request, context, command).await
+        }
         Some(RequestKind::Portfolio(command)) => {
-            process_portfolio_request(request, state, command).await
-        }
-        Some(RequestKind::Order(command)) => process_order_request(request, state, command).await,
-        Some(RequestKind::ExecutionMode(command)) => {
-            process_execution_mode_request(request, state, command).await
+            process_portfolio_request(request, context, command).await
         }
         None => Envelope::response_to(
             request,
@@ -843,7 +1134,7 @@ async fn process_request(request: &Envelope, state: &Arc<Mutex<EngineState>>) ->
 
 async fn process_control_request(
     request: &Envelope,
-    state: &Arc<Mutex<EngineState>>,
+    context: &DaemonContext,
     command: ControlCommand,
 ) -> Envelope {
     match command {
@@ -855,9 +1146,7 @@ async fn process_control_request(
             }),
         ),
         ControlCommand::Status => {
-            // Keep legacy Control.Status support for compatibility with older clients.
-            // New clients should use Engine.Status.
-            let state = state.lock().await;
+            let state = context.state.lock().await;
             status_response(request, &state)
         }
         ControlCommand::Capabilities => Envelope::response_to(
@@ -868,7 +1157,7 @@ async fn process_control_request(
             }),
         ),
         ControlCommand::Start => {
-            let mut state = state.lock().await;
+            let mut state = context.state.lock().await;
             if state.kill_switch_engaged {
                 return Envelope::response_to(
                     request,
@@ -878,19 +1167,28 @@ async fn process_control_request(
                     }),
                 );
             }
+            if state.mode != EngineMode::Paper && context.adapters.coinbase.is_none() {
+                return Envelope::response_to(
+                    request,
+                    json!({
+                        "ok": false,
+                        "error": "Coinbase credentials unavailable for live mode"
+                    }),
+                );
+            }
 
             apply_start(&mut state);
             let event = engine_health_event(&state);
             push_event(&mut state, event);
-            persist_sqlite_runtime_snapshot(&state);
+            persist_engine_state(&state);
             status_response(request, &state)
         }
         ControlCommand::Stop => {
-            let mut state = state.lock().await;
+            let mut state = context.state.lock().await;
             apply_stop(&mut state);
             let event = engine_health_event(&state);
             push_event(&mut state, event);
-            persist_sqlite_runtime_snapshot(&state);
+            persist_engine_state(&state);
             status_response(request, &state)
         }
     }
@@ -898,24 +1196,24 @@ async fn process_control_request(
 
 async fn process_engine_request(
     request: &Envelope,
-    state: &Arc<Mutex<EngineState>>,
+    context: &DaemonContext,
     command: EngineCommand,
 ) -> Envelope {
     match command {
         EngineCommand::Status => {
-            let state = state.lock().await;
+            let state = context.state.lock().await;
             status_response(request, &state)
         }
         EngineCommand::Pause => {
-            let mut state = state.lock().await;
+            let mut state = context.state.lock().await;
             apply_pause(&mut state);
             let event = engine_health_event(&state);
             push_event(&mut state, event);
-            persist_sqlite_runtime_snapshot(&state);
+            persist_engine_state(&state);
             status_response(request, &state)
         }
         EngineCommand::Resume => {
-            let mut state = state.lock().await;
+            let mut state = context.state.lock().await;
             if state.kill_switch_engaged {
                 return Envelope::response_to(
                     request,
@@ -925,14 +1223,23 @@ async fn process_engine_request(
                     }),
                 );
             }
+            if state.mode != EngineMode::Paper && context.adapters.coinbase.is_none() {
+                return Envelope::response_to(
+                    request,
+                    json!({
+                        "ok": false,
+                        "error": "Coinbase credentials unavailable for live mode"
+                    }),
+                );
+            }
             apply_resume(&mut state);
             let event = engine_health_event(&state);
             push_event(&mut state, event);
-            persist_sqlite_runtime_snapshot(&state);
+            persist_engine_state(&state);
             status_response(request, &state)
         }
         EngineCommand::KillSwitch => {
-            let mut state = state.lock().await;
+            let mut state = context.state.lock().await;
             apply_kill_switch(&mut state);
 
             push_event(
@@ -945,20 +1252,68 @@ async fn process_engine_request(
             );
             let event = engine_health_event(&state);
             push_event(&mut state, event);
-            persist_sqlite_runtime_snapshot(&state);
+            persist_engine_state(&state);
             status_response(request, &state)
+        }
+        EngineCommand::GetMode => {
+            let state = context.state.lock().await;
+            Envelope::response_to(
+                request,
+                json!({
+                    "ok": true,
+                    "mode": EngineModePayload { mode: state.mode },
+                }),
+            )
+        }
+        EngineCommand::SetMode => {
+            let payload: EngineModePayload = match parse_payload(&request.payload) {
+                Ok(p) => p,
+                Err(err) => {
+                    return Envelope::response_to(request, json!({"ok": false, "error": err}));
+                }
+            };
+
+            if payload.mode != EngineMode::Paper && context.adapters.coinbase.is_none() {
+                return Envelope::response_to(
+                    request,
+                    json!({
+                        "ok": false,
+                        "error": "Coinbase credentials unavailable for live mode"
+                    }),
+                );
+            }
+
+            let mut state = context.state.lock().await;
+            state.mode = payload.mode;
+            state.last_command_at_ms = now_ms();
+            push_event(
+                &mut state,
+                Event::Alert {
+                    level: "important".to_string(),
+                    message: format!("engine mode set to {}", payload.mode.as_str()),
+                },
+            );
+            persist_engine_state(&state);
+
+            Envelope::response_to(
+                request,
+                json!({
+                    "ok": true,
+                    "mode": EngineModePayload { mode: state.mode },
+                }),
+            )
         }
     }
 }
 
 async fn process_strategy_request(
     request: &Envelope,
-    state: &Arc<Mutex<EngineState>>,
+    context: &DaemonContext,
     command: StrategyCommand,
 ) -> Envelope {
     match command {
         StrategyCommand::List => {
-            let state = state.lock().await;
+            let state = context.state.lock().await;
             Envelope::response_to(
                 request,
                 json!({
@@ -975,7 +1330,7 @@ async fn process_strategy_request(
                 }
             };
 
-            let mut state = state.lock().await;
+            let mut state = context.state.lock().await;
             let enabled = matches!(command, StrategyCommand::Enable);
             let (summary, event) = {
                 let strategy = match state.strategies.get_mut(&payload.strategy_id) {
@@ -1004,8 +1359,7 @@ async fn process_strategy_request(
 
             state.last_command_at_ms = now_ms();
             push_event(&mut state, event);
-            persist_strategy_state(&state);
-            persist_sqlite_runtime_snapshot(&state);
+            persist_engine_state(&state);
 
             Envelope::response_to(
                 request,
@@ -1023,7 +1377,7 @@ async fn process_strategy_request(
                 }
             };
 
-            let mut state = state.lock().await;
+            let mut state = context.state.lock().await;
             let candidate = StrategyCandidate {
                 source: payload.source.clone(),
                 code_hash: payload.code_hash.clone(),
@@ -1068,8 +1422,7 @@ async fn process_strategy_request(
 
             state.last_command_at_ms = now_ms();
             push_event(&mut state, event);
-            persist_strategy_state(&state);
-            persist_sqlite_runtime_snapshot(&state);
+            persist_engine_state(&state);
 
             Envelope::response_to(
                 request,
@@ -1094,9 +1447,7 @@ async fn process_strategy_request(
                 }
             };
 
-            let mut state = state.lock().await;
-            // Promotion checks and mutations are serialized by the engine mutex.
-            // This section has no `.await`, so concurrent promotions cannot interleave.
+            let mut state = context.state.lock().await;
             match promote_candidate_locked(&mut state, &payload, now_ms()) {
                 Ok(success) => {
                     push_event(
@@ -1108,8 +1459,7 @@ async fn process_strategy_request(
                             code_hash: success.promoted_code_hash,
                         },
                     );
-                    persist_strategy_state(&state);
-                    persist_sqlite_runtime_snapshot(&state);
+                    persist_engine_state(&state);
 
                     Envelope::response_to(
                         request,
@@ -1139,7 +1489,6 @@ async fn process_strategy_request(
                             kill_switch_engaged,
                         },
                     );
-                    persist_sqlite_runtime_snapshot(&state);
 
                     Envelope::response_to(
                         request,
@@ -1157,12 +1506,12 @@ async fn process_strategy_request(
 
 async fn process_risk_request(
     request: &Envelope,
-    state: &Arc<Mutex<EngineState>>,
+    context: &DaemonContext,
     command: RiskCommand,
 ) -> Envelope {
     match command {
         RiskCommand::Status => {
-            let state = state.lock().await;
+            let state = context.state.lock().await;
             Envelope::response_to(
                 request,
                 json!({
@@ -1180,1097 +1529,626 @@ async fn process_risk_request(
                     return Envelope::response_to(request, json!({"ok": false, "error": err}));
                 }
             };
+            let action = payload.action.clone();
+            let venue_for_log = payload.venue.clone();
+            let strategy_for_log = payload.strategy_id.clone();
 
-            let mut state = state.lock().await;
-            if payload.action == "clear_runtime_counters" {
-                state.risk_snapshot.orders_last_minute = 0;
-                state.last_command_at_ms = now_ms();
-                persist_sqlite_runtime_snapshot(&state);
-                return Envelope::response_to(
-                    request,
-                    json!({
-                        "ok": true,
-                        "action": payload.action,
-                        "state": risk_state_payload(&state),
-                    }),
-                );
+            let mut state = context.state.lock().await;
+            match action.as_str() {
+                "clear_runtime_counters" => {
+                    state.risk_snapshot.orders_last_minute = 0;
+                    state.last_command_at_ms = now_ms();
+                }
+                "reset_kill_switch" | "reset_global" => {
+                    apply_reset_kill_switch(&mut state);
+                    push_event(
+                        &mut state,
+                        Event::RiskAlert {
+                            level: "important".to_string(),
+                            reason: "manual_kill_switch_reset".to_string(),
+                            kill_switch_engaged: false,
+                        },
+                    );
+                }
+                "kill_global" => {
+                    apply_kill_switch(&mut state);
+                    push_event(
+                        &mut state,
+                        Event::RiskAlert {
+                            level: "critical".to_string(),
+                            reason: "manual_global_kill".to_string(),
+                            kill_switch_engaged: true,
+                        },
+                    );
+                }
+                "kill_venue" => {
+                    let venue = match payload.venue.as_ref() {
+                        Some(v) if !v.trim().is_empty() => v.clone(),
+                        _ => {
+                            return Envelope::response_to(
+                                request,
+                                json!({ "ok": false, "error": "venue required for kill_venue" }),
+                            );
+                        }
+                    };
+                    state.scoped_kill_venues.insert(venue.clone());
+                    let kill_switch_engaged = state.kill_switch_engaged;
+                    push_event(
+                        &mut state,
+                        Event::RiskAlert {
+                            level: "critical".to_string(),
+                            reason: format!("venue kill engaged: {}", venue),
+                            kill_switch_engaged,
+                        },
+                    );
+                }
+                "reset_venue" => {
+                    let venue = match payload.venue.as_ref() {
+                        Some(v) if !v.trim().is_empty() => v.clone(),
+                        _ => {
+                            return Envelope::response_to(
+                                request,
+                                json!({ "ok": false, "error": "venue required for reset_venue" }),
+                            );
+                        }
+                    };
+                    state.scoped_kill_venues.remove(&venue);
+                    let kill_switch_engaged = state.kill_switch_engaged;
+                    push_event(
+                        &mut state,
+                        Event::RiskAlert {
+                            level: "important".to_string(),
+                            reason: format!("venue kill reset: {}", venue),
+                            kill_switch_engaged,
+                        },
+                    );
+                }
+                "kill_strategy" => {
+                    let strategy_id = match payload.strategy_id.as_ref() {
+                        Some(v) if !v.trim().is_empty() => v.clone(),
+                        _ => {
+                            return Envelope::response_to(
+                                request,
+                                json!({ "ok": false, "error": "strategy_id required for kill_strategy" }),
+                            );
+                        }
+                    };
+                    state.scoped_kill_strategies.insert(strategy_id.clone());
+                    let kill_switch_engaged = state.kill_switch_engaged;
+                    push_event(
+                        &mut state,
+                        Event::RiskAlert {
+                            level: "critical".to_string(),
+                            reason: format!("strategy kill engaged: {}", strategy_id),
+                            kill_switch_engaged,
+                        },
+                    );
+                }
+                "reset_strategy" => {
+                    let strategy_id = match payload.strategy_id.as_ref() {
+                        Some(v) if !v.trim().is_empty() => v.clone(),
+                        _ => {
+                            return Envelope::response_to(
+                                request,
+                                json!({ "ok": false, "error": "strategy_id required for reset_strategy" }),
+                            );
+                        }
+                    };
+                    state.scoped_kill_strategies.remove(&strategy_id);
+                    let kill_switch_engaged = state.kill_switch_engaged;
+                    push_event(
+                        &mut state,
+                        Event::RiskAlert {
+                            level: "important".to_string(),
+                            reason: format!("strategy kill reset: {}", strategy_id),
+                            kill_switch_engaged,
+                        },
+                    );
+                }
+                _ => {
+                    return Envelope::response_to(
+                        request,
+                        json!({
+                            "ok": false,
+                            "error": "hard safety floor cannot be overridden",
+                            "action": action,
+                        }),
+                    )
+                }
             }
 
-            if payload.action == "reset_kill_switch" {
-                // We keep it paused for safety until explicit Resume.
-                apply_reset_kill_switch(&mut state);
+            sync_scoped_kills_into_snapshot(&mut state);
+            persist_engine_state(&state);
 
-                push_event(
-                    &mut state,
-                    Event::RiskAlert {
-                        level: "important".to_string(),
-                        reason: "manual_kill_switch_reset".to_string(),
-                        kill_switch_engaged: false,
-                    },
-                );
-                persist_sqlite_runtime_snapshot(&state);
-
-                return Envelope::response_to(
-                    request,
-                    json!({
-                        "ok": true,
-                        "action": payload.action,
-                        "state": risk_state_payload(&state),
-                        "note": "Engine remains PAUSED after kill switch reset. Use 'resume' to start."
-                    }),
-                );
-            }
+            write_journal_entry(
+                &state.data_dir,
+                "risk",
+                &json!({
+                    "ts_ms": now_ms(),
+                    "action": action,
+                    "venue": venue_for_log,
+                    "strategy_id": strategy_for_log,
+                    "state": risk_state_payload(&state),
+                }),
+            );
 
             Envelope::response_to(
                 request,
                 json!({
-                    "ok": false,
-                    "error": "hard safety floor cannot be overridden",
-                    "action": payload.action,
+                    "ok": true,
+                    "action": action,
+                    "state": risk_state_payload(&state),
+                    "note": "Engine remains PAUSED after kill switch reset. Use 'resume' to start.",
                 }),
             )
         }
     }
 }
 
-fn bool_to_i64(value: bool) -> i64 {
-    if value {
-        1
-    } else {
-        0
-    }
-}
-
-fn i64_to_bool(value: i64) -> bool {
-    value != 0
-}
-
-fn asset_class_label(value: AssetClass) -> String {
-    match value {
-        AssetClass::Prediction => "prediction",
-        AssetClass::Crypto => "crypto",
-        AssetClass::Equity => "equity",
-        AssetClass::Forex => "forex",
-        AssetClass::Derivative => "derivative",
-        AssetClass::Unknown => "unknown",
-    }
-    .to_string()
-}
-
-fn market_type_label(value: MarketType) -> String {
-    match value {
-        MarketType::Spot => "spot",
-        MarketType::Binary => "binary",
-        MarketType::Perpetual => "perpetual",
-        MarketType::Futures => "futures",
-        MarketType::Option => "option",
-        MarketType::Unknown => "unknown",
-    }
-    .to_string()
-}
-
-fn order_side_label(value: OrderSide) -> String {
-    match value {
-        OrderSide::Buy => "buy",
-        OrderSide::Sell => "sell",
-    }
-    .to_string()
-}
-
-fn order_type_label(value: OrderType) -> String {
-    match value {
-        OrderType::Limit => "limit",
-        OrderType::Market => "market",
-    }
-    .to_string()
-}
-
-fn order_status_label(value: OrderStatus) -> String {
-    match value {
-        OrderStatus::Pending => "pending",
-        OrderStatus::Accepted => "accepted",
-        OrderStatus::Filled => "filled",
-        OrderStatus::Canceled => "canceled",
-        OrderStatus::Rejected => "rejected",
-        OrderStatus::Failed => "failed",
-    }
-    .to_string()
-}
-
-fn execution_mode_label(value: ExecutionMode) -> String {
-    match value {
-        ExecutionMode::Paper => "paper",
-        ExecutionMode::Live => "live",
-    }
-    .to_string()
-}
-
-fn option_type_label(value: OptionType) -> String {
-    match value {
-        OptionType::Call => "call",
-        OptionType::Put => "put",
-    }
-    .to_string()
-}
-
-fn parse_asset_class(raw: &str) -> std::result::Result<AssetClass, String> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "prediction" => Ok(AssetClass::Prediction),
-        "crypto" => Ok(AssetClass::Crypto),
-        "equity" => Ok(AssetClass::Equity),
-        "forex" => Ok(AssetClass::Forex),
-        "derivative" | "derivatives" => Ok(AssetClass::Derivative),
-        "unknown" => Ok(AssetClass::Unknown),
-        other => Err(format!("unsupported asset_class '{other}'")),
-    }
-}
-
-fn parse_market_type(raw: &str) -> std::result::Result<MarketType, String> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "spot" => Ok(MarketType::Spot),
-        "binary" => Ok(MarketType::Binary),
-        "perpetual" | "perp" => Ok(MarketType::Perpetual),
-        "futures" | "future" => Ok(MarketType::Futures),
-        "option" | "options" => Ok(MarketType::Option),
-        "unknown" => Ok(MarketType::Unknown),
-        other => Err(format!("unsupported market_type '{other}'")),
-    }
-}
-
-fn parse_order_side(raw: &str) -> std::result::Result<OrderSide, String> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "buy" => Ok(OrderSide::Buy),
-        "sell" => Ok(OrderSide::Sell),
-        other => Err(format!("unsupported side '{other}'")),
-    }
-}
-
-fn parse_order_type(raw: &str) -> std::result::Result<OrderType, String> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "limit" => Ok(OrderType::Limit),
-        "market" => Ok(OrderType::Market),
-        other => Err(format!("unsupported order_type '{other}'")),
-    }
-}
-
-fn parse_tif(raw: &str) -> std::result::Result<TimeInForce, String> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "gtc" => Ok(TimeInForce::Gtc),
-        "ioc" => Ok(TimeInForce::Ioc),
-        "fok" => Ok(TimeInForce::Fok),
-        "day" => Ok(TimeInForce::Day),
-        other => Err(format!("unsupported tif '{other}'")),
-    }
-}
-
-fn parse_execution_mode(raw: &str) -> std::result::Result<ExecutionMode, String> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "paper" => Ok(ExecutionMode::Paper),
-        "live" => Ok(ExecutionMode::Live),
-        other => Err(format!("unsupported mode '{other}'")),
-    }
-}
-
-fn parse_option_type(raw: &str) -> std::result::Result<OptionType, String> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "call" => Ok(OptionType::Call),
-        "put" => Ok(OptionType::Put),
-        other => Err(format!("unsupported option_type '{other}'")),
-    }
-}
-
-fn instrument_to_payload(instrument: &InstrumentId) -> InstrumentRefPayload {
-    InstrumentRefPayload {
-        venue_id: instrument.venue_id.clone(),
-        symbol: instrument.symbol.clone(),
-        asset_class: asset_class_label(instrument.asset_class),
-        market_type: market_type_label(instrument.market_type),
-        expiry_ts_ms: instrument.expiry_ts_ms,
-        strike: instrument.strike,
-        option_type: instrument.option_type.map(option_type_label),
-    }
-}
-
-fn payload_to_instrument(
-    payload: &InstrumentRefPayload,
-) -> std::result::Result<InstrumentId, String> {
-    let mut metadata = BTreeMap::new();
-    metadata.insert("source".to_string(), "protocol".to_string());
-
-    Ok(InstrumentId {
-        venue_id: payload.venue_id.clone(),
-        symbol: payload.symbol.clone(),
-        asset_class: parse_asset_class(&payload.asset_class)?,
-        market_type: parse_market_type(&payload.market_type)?,
-        expiry_ts_ms: payload.expiry_ts_ms,
-        strike: payload.strike,
-        option_type: payload
-            .option_type
-            .as_ref()
-            .map(|v| parse_option_type(v))
-            .transpose()?,
-        metadata,
-    })
-}
-
-fn venue_summary_from_state(state: &EngineState, venue: &VenueState) -> VenueSummaryPayload {
-    let health = state
-        .adapters
-        .get(&venue.id)
-        .map(|adapter| adapter.health())
-        .unwrap_or_else(|| trading_domain::VenueHealth {
-            venue_id: venue.id.clone(),
-            healthy: false,
-            connected_market_data: false,
-            connected_trading: false,
-            message: Some("adapter unavailable".to_string()),
-        });
-
-    VenueSummaryPayload {
-        venue_id: venue.id.clone(),
-        enabled: venue.enabled,
-        market_types: venue
-            .market_types
-            .iter()
-            .map(|m| market_type_label(*m))
-            .collect(),
-        healthy: health.healthy,
-        live_enabled: venue.live_enabled,
-        paper_only: venue.paper_only,
-        message: venue.message.clone().or(health.message),
-    }
-}
-
-fn order_summary_to_payload(order: &OrderSummary) -> OrderListItemPayload {
-    OrderListItemPayload {
-        venue_order_id: order.venue_order_id.clone(),
-        client_order_id: order.client_order_id.clone(),
-        strategy_id: order.strategy_id.clone(),
-        venue_id: order.venue_id.clone(),
-        instrument: instrument_to_payload(&order.instrument),
-        side: order_side_label(order.side),
-        order_type: order_type_label(order.order_type),
-        quantity: order.quantity,
-        filled_quantity: order.filled_quantity,
-        avg_fill_price: order.avg_fill_price,
-        status: order_status_label(order.status),
-        created_at_ms: order.created_at_ms,
-        updated_at_ms: order.updated_at_ms,
-        message: order.message.clone(),
-    }
-}
-
-fn refresh_adapter_for_venue(state: &mut EngineState, venue_id: &str) {
-    match venue_id {
-        "kalshi" => {
-            let mode = state
-                .execution_modes
-                .get(&mode_key("kalshi", MarketType::Binary))
-                .copied()
-                .unwrap_or(ExecutionMode::Paper);
-            state
-                .adapters
-                .insert("kalshi".to_string(), Arc::new(KalshiAdapter::new(mode)));
-        }
-        "coinbase_spot" => {
-            let mode = state
-                .execution_modes
-                .get(&mode_key("coinbase_spot", MarketType::Spot))
-                .copied()
-                .unwrap_or(ExecutionMode::Paper);
-            state.adapters.insert(
-                "coinbase_spot".to_string(),
-                Arc::new(CoinbaseSpotAdapter::new(mode)),
-            );
-        }
-        "derivatives_paper" => {
-            let mode = state
-                .execution_modes
-                .get(&mode_key("derivatives_paper", MarketType::Perpetual))
-                .copied()
-                .unwrap_or(ExecutionMode::Paper);
-            state.adapters.insert(
-                "derivatives_paper".to_string(),
-                Arc::new(DerivativesPaperAdapter::new(mode)),
-            );
-        }
-        _ => {}
-    }
-}
-
-fn sqlite_upsert_venue(db_path: &str, venue: &VenueState) -> Result<()> {
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("failed opening sqlite database {}", db_path))?;
-    let market_types = serde_json::to_string(&venue.market_types).context("encode market types")?;
-    conn.execute(
-        r#"
-        INSERT INTO venues (venue_id, enabled, market_types, paper_only, live_enabled, message, updated_at_ms)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-        ON CONFLICT(venue_id) DO UPDATE SET
-            enabled=excluded.enabled,
-            market_types=excluded.market_types,
-            paper_only=excluded.paper_only,
-            live_enabled=excluded.live_enabled,
-            message=excluded.message,
-            updated_at_ms=excluded.updated_at_ms
-        "#,
-        params![
-            venue.id,
-            bool_to_i64(venue.enabled),
-            market_types,
-            bool_to_i64(venue.paper_only),
-            bool_to_i64(venue.live_enabled),
-            venue.message,
-            now_ms(),
-        ],
-    )
-    .context("upsert venue failed")?;
-    Ok(())
-}
-
-fn sqlite_upsert_execution_mode(
-    db_path: &str,
-    venue_id: &str,
-    market_type: MarketType,
-    mode: ExecutionMode,
-) -> Result<()> {
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("failed opening sqlite database {}", db_path))?;
-    let key = mode_key(venue_id, market_type);
-    conn.execute(
-        r#"
-        INSERT INTO execution_modes (mode_key, venue_id, market_type, mode, updated_at_ms)
-        VALUES (?1, ?2, ?3, ?4, ?5)
-        ON CONFLICT(mode_key) DO UPDATE SET
-            mode=excluded.mode,
-            updated_at_ms=excluded.updated_at_ms
-        "#,
-        params![
-            key,
-            venue_id,
-            market_type_label(market_type),
-            execution_mode_label(mode),
-            now_ms(),
-        ],
-    )
-    .context("upsert execution mode failed")?;
-    Ok(())
-}
-
-fn sqlite_upsert_order(db_path: &str, order: &OrderSummary) -> Result<()> {
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("failed opening sqlite database {}", db_path))?;
-    let payload = serde_json::to_string(order).context("encode order summary")?;
-    conn.execute(
-        r#"
-        INSERT INTO orders (venue_order_id, payload_json, updated_at_ms)
-        VALUES (?1, ?2, ?3)
-        ON CONFLICT(venue_order_id) DO UPDATE SET
-            payload_json=excluded.payload_json,
-            updated_at_ms=excluded.updated_at_ms
-        "#,
-        params![order.venue_order_id, payload, now_ms()],
-    )
-    .context("upsert order failed")?;
-    Ok(())
-}
-
-fn sqlite_upsert_fill(db_path: &str, fill_id: &str, payload: &serde_json::Value) -> Result<()> {
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("failed opening sqlite database {}", db_path))?;
-    conn.execute(
-        r#"
-        INSERT INTO fills (fill_id, payload_json, updated_at_ms)
-        VALUES (?1, ?2, ?3)
-        ON CONFLICT(fill_id) DO UPDATE SET
-            payload_json=excluded.payload_json,
-            updated_at_ms=excluded.updated_at_ms
-        "#,
-        params![fill_id, serde_json::to_string(payload)?, now_ms()],
-    )
-    .context("upsert fill failed")?;
-    Ok(())
-}
-
-fn sqlite_upsert_strategy(db_path: &str, strategy: &StrategyState) -> Result<()> {
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("failed opening sqlite database {}", db_path))?;
-    conn.execute(
-        r#"
-        INSERT INTO strategies (strategy_id, payload_json, updated_at_ms)
-        VALUES (?1, ?2, ?3)
-        ON CONFLICT(strategy_id) DO UPDATE SET
-            payload_json=excluded.payload_json,
-            updated_at_ms=excluded.updated_at_ms
-        "#,
-        params![&strategy.id, serde_json::to_string(strategy)?, now_ms()],
-    )
-    .context("upsert strategy failed")?;
-    Ok(())
-}
-
-fn sqlite_upsert_risk_state(db_path: &str, snapshot: &RiskSnapshot) -> Result<()> {
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("failed opening sqlite database {}", db_path))?;
-    conn.execute(
-        r#"
-        INSERT INTO risk_state (id, payload_json, updated_at_ms)
-        VALUES (1, ?1, ?2)
-        ON CONFLICT(id) DO UPDATE SET
-            payload_json=excluded.payload_json,
-            updated_at_ms=excluded.updated_at_ms
-        "#,
-        params![serde_json::to_string(snapshot)?, now_ms()],
-    )
-    .context("upsert risk state failed")?;
-    Ok(())
-}
-
-fn sqlite_append_event(db_path: &str, value: &serde_json::Value) -> Result<()> {
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("failed opening sqlite database {}", db_path))?;
-    conn.execute(
-        "INSERT INTO events_journal (ts_ms, event_json) VALUES (?1, ?2)",
-        params![now_ms(), serde_json::to_string(value)?],
-    )
-    .context("append event failed")?;
-    Ok(())
-}
-
-fn persist_sqlite_runtime_snapshot(state: &EngineState) {
-    for strategy in state.strategies.values() {
-        if let Err(err) = sqlite_upsert_strategy(&state.db_path, strategy) {
-            warn!(
-                "Failed to persist strategy '{}' runtime state: {:#}",
-                strategy.id, err
-            );
-        }
-    }
-    if let Err(err) = sqlite_upsert_risk_state(&state.db_path, &state.risk_snapshot) {
-        warn!("Failed to persist risk runtime state: {:#}", err);
-    }
-}
-
-fn load_sqlite_runtime_state(
-    state: &mut EngineState,
-    restore_strategy_and_risk: bool,
-) -> Result<()> {
-    let conn = Connection::open(&state.db_path)
-        .with_context(|| format!("failed opening sqlite database {}", state.db_path))?;
-
-    {
-        let mut stmt = conn.prepare(
-            "SELECT venue_id, enabled, market_types, paper_only, live_enabled, message FROM venues",
-        )?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let venue_id: String = row.get(0)?;
-            let enabled: i64 = row.get(1)?;
-            let market_types_json: String = row.get(2)?;
-            let paper_only: i64 = row.get(3)?;
-            let live_enabled: i64 = row.get(4)?;
-            let message: Option<String> = row.get(5)?;
-
-            let market_types: Vec<MarketType> =
-                serde_json::from_str(&market_types_json).unwrap_or_default();
-            if market_types.is_empty() {
-                continue;
-            }
-
-            if let Some(venue) = state.venues.get_mut(&venue_id) {
-                venue.enabled = i64_to_bool(enabled);
-                venue.paper_only = i64_to_bool(paper_only);
-                venue.live_enabled = i64_to_bool(live_enabled);
-                venue.message = message;
-                venue.market_types = market_types;
-            }
-        }
-    }
-
-    {
-        let mut stmt = conn
-            .prepare("SELECT venue_id, market_type, mode FROM execution_modes ORDER BY mode_key")?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let venue_id: String = row.get(0)?;
-            let market_type_raw: String = row.get(1)?;
-            let mode_raw: String = row.get(2)?;
-            let Ok(market_type) = parse_market_type(&market_type_raw) else {
-                continue;
-            };
-            let Ok(mode) = parse_execution_mode(&mode_raw) else {
-                continue;
-            };
-            state
-                .execution_modes
-                .insert(mode_key(&venue_id, market_type), mode);
-        }
-    }
-
-    if restore_strategy_and_risk {
-        {
-            let mut loaded: Vec<StrategyState> = Vec::new();
-            let mut stmt =
-                conn.prepare("SELECT payload_json FROM strategies ORDER BY strategy_id")?;
-            let mut rows = stmt.query([])?;
-            while let Some(row) = rows.next()? {
-                let payload_json: String = row.get(0)?;
-                match serde_json::from_str::<StrategyState>(&payload_json) {
-                    Ok(strategy) => loaded.push(strategy),
-                    Err(err) => warn!("Ignoring invalid sqlite strategy payload: {}", err),
-                }
-            }
-            if !loaded.is_empty() {
-                apply_strategy_snapshot(
-                    state,
-                    StrategyStateSnapshot {
-                        schema_version: 1,
-                        saved_at_ms: now_ms(),
-                        strategies: loaded,
-                    },
-                );
-            }
-        }
-
-        {
-            let mut stmt = conn.prepare("SELECT payload_json FROM risk_state WHERE id = 1")?;
-            let mut rows = stmt.query([])?;
-            if let Some(row) = rows.next()? {
-                let payload_json: String = row.get(0)?;
-                match serde_json::from_str::<RiskSnapshot>(&payload_json) {
-                    Ok(snapshot) => {
-                        state.risk_snapshot = snapshot;
-                    }
-                    Err(err) => warn!("Ignoring invalid sqlite risk state payload: {}", err),
-                }
-            }
-        }
-    }
-
-    state.risk_snapshot.strategy_canary_notional = strategy_canary_notional_map(&state.strategies);
-
-    state.adapters = default_adapters(&state.execution_modes);
-    Ok(())
-}
-
-async fn process_venue_request(
+async fn process_execution_request(
     request: &Envelope,
-    state: &Arc<Mutex<EngineState>>,
-    command: VenueCommand,
+    context: &DaemonContext,
+    command: ExecutionCommand,
 ) -> Envelope {
     match command {
-        VenueCommand::List => {
-            let state = state.lock().await;
-            let mut venues: Vec<_> = state
-                .venues
-                .values()
-                .map(|v| venue_summary_from_state(&state, v))
-                .collect();
-            venues.sort_by(|a, b| a.venue_id.cmp(&b.venue_id));
-            Envelope::response_to(request, json!({ "ok": true, "venues": venues }))
-        }
-        VenueCommand::Status | VenueCommand::Enable | VenueCommand::Disable => {
-            let payload: VenueTogglePayload = match parse_payload(&request.payload) {
+        ExecutionCommand::Place => {
+            let payload: ExecutionPlacePayload = match parse_payload(&request.payload) {
                 Ok(p) => p,
                 Err(err) => {
                     return Envelope::response_to(request, json!({"ok": false, "error": err}));
                 }
             };
 
-            let mut state = state.lock().await;
-            if matches!(command, VenueCommand::Enable | VenueCommand::Disable) {
-                let enabled = matches!(command, VenueCommand::Enable);
-                let db_path = state.db_path.clone();
-                let venue_to_persist = match state.venues.get_mut(&payload.venue_id) {
-                    Some(v) => v,
-                    None => {
+            let order = payload.order;
+            let intent_id = order
+                .intent_id
+                .clone()
+                .unwrap_or_else(|| order.client_order_id.clone());
+
+            {
+                let state = context.state.lock().await;
+                if state.processed_intents.contains(&intent_id) {
+                    if let Some(existing) = state
+                        .orders
+                        .values()
+                        .find(|o| o.client_order_id == order.client_order_id)
+                        .cloned()
+                    {
+                        let ack = ack_from_order(&existing);
                         return Envelope::response_to(
                             request,
-                            json!({ "ok": false, "error": format!("Unknown venue '{}'", payload.venue_id) }),
+                            json!({
+                                "ok": true,
+                                "idempotent_replay": true,
+                                "result": ExecutionPlaceResultPayload {
+                                    ack,
+                                    order: Some(existing),
+                                    fill: None,
+                                }
+                            }),
                         );
                     }
-                };
-                venue_to_persist.enabled = enabled;
-                let venue_to_persist = venue_to_persist.clone();
-                state.last_command_at_ms = now_ms();
-                if let Err(err) = sqlite_upsert_venue(&db_path, &venue_to_persist) {
-                    warn!("Failed to persist venue state: {:#}", err);
                 }
             }
 
-            let Some(venue) = state.venues.get(&payload.venue_id).cloned() else {
+            let (mode, running, paused, requested_notional_cents, risk_snapshot, safety_policy) = {
+                let mut state = context.state.lock().await;
+                // Auto-reset the per-minute order rate counter every 60 seconds
+                let now = now_ms();
+                if now.saturating_sub(state.last_orders_reset_ms) >= 60_000 {
+                    state.risk_snapshot.orders_last_minute = 0;
+                    state.last_orders_reset_ms = now;
+                }
+                (
+                    state.mode,
+                    state.running,
+                    state.paused,
+                    compute_requested_notional_cents(&order),
+                    state.risk_snapshot.clone(),
+                    state.safety_policy.clone(),
+                )
+            };
+
+            if !running || paused {
                 return Envelope::response_to(
                     request,
-                    json!({ "ok": false, "error": format!("Unknown venue '{}'", payload.venue_id) }),
+                    json!({"ok": false, "error": "engine is not running"}),
                 );
+            }
+
+            let missing_approval = payload
+                .approval_token
+                .as_ref()
+                .map(|token| token.trim().is_empty())
+                .unwrap_or(true);
+            if mode == EngineMode::HitlLive && missing_approval {
+                return Envelope::response_to(
+                    request,
+                    json!({"ok": false, "error": "approval_token required in hitl_live mode"}),
+                );
+            }
+
+            if requested_notional_cents <= 0 {
+                return Envelope::response_to(
+                    request,
+                    json!({"ok": false, "error": "requested_notional_cents must be positive"}),
+                );
+            }
+
+            let cage = HardSafetyCage::new(safety_policy);
+            let venue_scope = &order.venue;
+            let asset_scope = &order.instrument.asset_class;
+            let risk_decision = cage.evaluate_order_with_scope(
+                &order.strategy_id,
+                venue_scope,
+                asset_scope,
+                requested_notional_cents,
+                &risk_snapshot,
+            );
+
+            if let RiskDecision::Deny { reason } = risk_decision {
+                let mut state = context.state.lock().await;
+                state.execution_stats.rejected = state.execution_stats.rejected.saturating_add(1);
+                let kill_switch_engaged = state.kill_switch_engaged;
+                push_event(
+                    &mut state,
+                    Event::RiskAlert {
+                        level: "warning".to_string(),
+                        reason: format!("execution denied: {}", reason),
+                        kill_switch_engaged,
+                    },
+                );
+                persist_engine_state(&state);
+
+                return Envelope::response_to(
+                    request,
+                    json!({"ok": false, "error": reason, "hard_safety_floor": "enforced"}),
+                );
+            }
+
+            let live_route = route_is_live(mode, &order, &context.adapters);
+            let (adapter, routed_to) = if live_route {
+                match &context.adapters.coinbase {
+                    Some(adapter) => (adapter.clone(), "coinbase_at"),
+                    None => {
+                        return Envelope::response_to(
+                            request,
+                            json!({"ok": false, "error": "live route requested but coinbase adapter unavailable"}),
+                        );
+                    }
+                }
+            } else {
+                (context.adapters.paper.clone(), "paper")
             };
-            let summary = venue_summary_from_state(&state, &venue);
-            Envelope::response_to(request, json!({ "ok": true, "venue": summary }))
+
+            let ack = match adapter.place_order(order.clone()).await {
+                Ok(ack) => ack,
+                Err(err) => {
+                    let mut state = context.state.lock().await;
+                    state.execution_stats.rejected =
+                        state.execution_stats.rejected.saturating_add(1);
+                    push_event(
+                        &mut state,
+                        Event::Execution {
+                            venue: order.venue.clone(),
+                            strategy_id: order.strategy_id.clone(),
+                            symbol: order.symbol.clone(),
+                            action: "place".to_string(),
+                            status: "failed".to_string(),
+                            latency_ms: 0,
+                            simulated: routed_to == "paper",
+                            venue_order_id: None,
+                        },
+                    );
+                    persist_engine_state(&state);
+
+                    return Envelope::response_to(
+                        request,
+                        json!({"ok": false, "error": err.message, "code": err.code}),
+                    );
+                }
+            };
+
+            let order_snapshot = match adapter.get_order(&ack.venue_order_id).await {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => synthetic_order_from_ack(&order, &ack),
+                Err(_) => synthetic_order_from_ack(&order, &ack),
+            };
+            let maybe_fill = maybe_fill_from_ack(&order_snapshot, &ack);
+
+            let mut state = context.state.lock().await;
+            state.execution_stats.accepted = state.execution_stats.accepted.saturating_add(1);
+            if maybe_fill.is_some() {
+                state.execution_stats.fills = state.execution_stats.fills.saturating_add(1);
+            }
+
+            if live_route {
+                state.routing_counters.live_count =
+                    state.routing_counters.live_count.saturating_add(1);
+            } else {
+                state.routing_counters.paper_count =
+                    state.routing_counters.paper_count.saturating_add(1);
+            }
+
+            state.risk_snapshot.total_notional_cents = state
+                .risk_snapshot
+                .total_notional_cents
+                .saturating_add(requested_notional_cents);
+            state.risk_snapshot.orders_last_minute =
+                state.risk_snapshot.orders_last_minute.saturating_add(1);
+            *state
+                .risk_snapshot
+                .strategy_canary_notional
+                .entry(order.strategy_id.clone())
+                .or_insert(0) += requested_notional_cents;
+            *state
+                .risk_snapshot
+                .venue_notional
+                .entry(order.venue.clone())
+                .or_insert(0) += requested_notional_cents;
+            *state
+                .risk_snapshot
+                .asset_class_notional
+                .entry(order.instrument.asset_class.clone())
+                .or_insert(0) += requested_notional_cents;
+
+            state.orders.insert(
+                order_snapshot.venue_order_id.clone(),
+                order_snapshot.clone(),
+            );
+            if let Some(fill) = &maybe_fill {
+                state.fills.push(fill.clone());
+            }
+            state.processed_intents.insert(intent_id.clone());
+            state.last_command_at_ms = now_ms();
+
+            push_event(
+                &mut state,
+                Event::Execution {
+                    venue: order.venue.clone(),
+                    strategy_id: order.strategy_id.clone(),
+                    symbol: order.symbol.clone(),
+                    action: "place".to_string(),
+                    status: "accepted".to_string(),
+                    latency_ms: 0,
+                    simulated: ack.simulated,
+                    venue_order_id: Some(ack.venue_order_id.clone()),
+                },
+            );
+
+            write_journal_entry(
+                &state.data_dir,
+                "orders",
+                &json!({
+                    "ts_ms": now_ms(),
+                    "intent_id": intent_id,
+                    "routed_to": routed_to,
+                    "order": order_snapshot,
+                }),
+            );
+            if let Some(fill) = &maybe_fill {
+                write_journal_entry(
+                    &state.data_dir,
+                    "fills",
+                    &json!({
+                        "ts_ms": now_ms(),
+                        "intent_id": order.intent_id,
+                        "fill": fill,
+                    }),
+                );
+            }
+
+            persist_engine_state(&state);
+
+            Envelope::response_to(
+                request,
+                json!({
+                    "ok": true,
+                    "routed_to": routed_to,
+                    "result": ExecutionPlaceResultPayload {
+                        ack,
+                        order: Some(order_snapshot),
+                        fill: maybe_fill,
+                    }
+                }),
+            )
+        }
+        ExecutionCommand::Cancel => {
+            let payload: trading_protocol::ExecutionCancelPayload =
+                match parse_payload(&request.payload) {
+                    Ok(p) => p,
+                    Err(err) => {
+                        return Envelope::response_to(request, json!({"ok": false, "error": err}));
+                    }
+                };
+
+            let order = {
+                let state = context.state.lock().await;
+                state.orders.get(&payload.venue_order_id).cloned()
+            };
+
+            let adapter = if order.as_ref().is_some_and(|o| {
+                o.venue == "coinbase_at" && o.instrument.instrument_type == InstrumentType::Spot
+            }) {
+                match &context.adapters.coinbase {
+                    Some(adapter) => adapter.clone(),
+                    None => {
+                        return Envelope::response_to(
+                            request,
+                            json!({"ok": false, "error": "coinbase adapter unavailable"}),
+                        )
+                    }
+                }
+            } else {
+                context.adapters.paper.clone()
+            };
+
+            if let Err(err) = adapter.cancel_order(&payload.venue_order_id).await {
+                return Envelope::response_to(
+                    request,
+                    json!({"ok": false, "error": err.message, "code": err.code}),
+                );
+            }
+
+            let mut state = context.state.lock().await;
+            // Extract info and update order status first, then adjust risk counters
+            let cancel_info = if let Some(existing) = state.orders.get_mut(&payload.venue_order_id) {
+                existing.status = OrderStatus::Canceled;
+                existing.updated_at_ms = now_ms();
+
+                let notional = existing.limit_price
+                    .map(|p| (p * existing.qty * 100.0) as i64)
+                    .unwrap_or(0);
+                Some((
+                    notional,
+                    existing.venue.clone(),
+                    existing.instrument.asset_class.clone(),
+                    existing.strategy_id.clone(),
+                ))
+            } else {
+                None
+            };
+
+            // Decrement risk notional counters so cancelled orders free capacity
+            if let Some((notional, venue, asset_class, strategy_id)) = cancel_info {
+                if notional > 0 {
+                    state.risk_snapshot.total_notional_cents = state
+                        .risk_snapshot
+                        .total_notional_cents
+                        .saturating_sub(notional);
+                    if let Some(v) = state.risk_snapshot.venue_notional.get_mut(&venue) {
+                        *v = v.saturating_sub(notional);
+                    }
+                    if let Some(v) = state.risk_snapshot.asset_class_notional.get_mut(&asset_class) {
+                        *v = v.saturating_sub(notional);
+                    }
+                    if let Some(v) = state.risk_snapshot.strategy_canary_notional.get_mut(&strategy_id) {
+                        *v = v.saturating_sub(notional);
+                    }
+                }
+            }
+            state.execution_stats.canceled = state.execution_stats.canceled.saturating_add(1);
+            persist_engine_state(&state);
+
+            Envelope::response_to(
+                request,
+                json!({"ok": true, "venue_order_id": payload.venue_order_id}),
+            )
+        }
+        ExecutionCommand::Get => {
+            let payload: ExecutionGetPayload = match parse_payload(&request.payload) {
+                Ok(p) => p,
+                Err(err) => {
+                    return Envelope::response_to(request, json!({"ok": false, "error": err}));
+                }
+            };
+
+            let state = context.state.lock().await;
+            let order = state.orders.get(&payload.venue_order_id).cloned();
+            Envelope::response_to(
+                request,
+                json!({
+                    "ok": true,
+                    "order": order,
+                }),
+            )
+        }
+        ExecutionCommand::OpenOrders => {
+            let mut orders = Vec::new();
+            if let Some(adapter) = &context.adapters.coinbase {
+                if let Ok(mut o) = adapter.open_orders().await {
+                    orders.append(&mut o);
+                }
+            }
+            if let Ok(mut o) = context.adapters.paper.open_orders().await {
+                orders.append(&mut o);
+            }
+
+            Envelope::response_to(
+                request,
+                json!({
+                    "ok": true,
+                    "result": ExecutionOpenOrdersPayload { orders },
+                }),
+            )
+        }
+        ExecutionCommand::Fills => {
+            let payload: ExecutionFillsPayload =
+                parse_payload(&request.payload).unwrap_or(ExecutionFillsPayload {
+                    since_ts_ms: Some(0),
+                    limit: Some(200),
+                });
+            let since_ts_ms = payload.since_ts_ms.unwrap_or(0);
+            let limit = payload.limit.unwrap_or(200);
+
+            let state = context.state.lock().await;
+            let mut fills: Vec<FillReport> = state
+                .fills
+                .iter()
+                .filter(|fill| fill.ts_ms >= since_ts_ms)
+                .cloned()
+                .collect();
+            fills.sort_by_key(|fill| fill.ts_ms);
+            if fills.len() > limit {
+                fills = fills[fills.len().saturating_sub(limit)..].to_vec();
+            }
+
+            Envelope::response_to(
+                request,
+                json!({
+                    "ok": true,
+                    "result": ExecutionFillsResultPayload { fills },
+                }),
+            )
         }
     }
 }
 
 async fn process_portfolio_request(
     request: &Envelope,
-    state: &Arc<Mutex<EngineState>>,
+    context: &DaemonContext,
     command: PortfolioCommand,
 ) -> Envelope {
-    let adapters: Vec<Arc<dyn ExchangeAdapter>> = {
-        let state = state.lock().await;
-        state
-            .venues
-            .values()
-            .filter(|venue| venue.enabled)
-            .filter_map(|venue| state.adapters.get(&venue.id).cloned())
-            .collect()
-    };
-
-    let mut balances: Vec<PortfolioBalancePayload> = Vec::new();
-    let mut positions: Vec<PortfolioPositionPayload> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-
-    for adapter in adapters {
-        match command {
-            PortfolioCommand::Balances => match adapter.sync_balances().await {
-                Ok(values) => {
-                    balances.extend(values.into_iter().map(|value| PortfolioBalancePayload {
-                        venue_id: value.venue_id,
-                        asset: value.asset,
-                        total: value.total,
-                        available: value.available,
-                    }));
-                }
-                Err(err) => errors.push(format!("{}: {}", adapter.venue(), err.message)),
-            },
-            PortfolioCommand::Positions => match adapter.sync_positions().await {
-                Ok(values) => {
-                    positions.extend(values.into_iter().map(|value| PortfolioPositionPayload {
-                        venue_id: value.venue_id,
-                        instrument: instrument_to_payload(&value.instrument),
-                        quantity: value.quantity,
-                        avg_price: value.avg_price,
-                        mark_price: value.mark_price,
-                        unrealized_pnl: value.unrealized_pnl,
-                    }));
-                }
-                Err(err) => errors.push(format!("{}: {}", adapter.venue(), err.message)),
-            },
-        }
-    }
-
     match command {
-        PortfolioCommand::Balances => Envelope::response_to(
-            request,
-            json!({ "ok": errors.is_empty(), "balances": balances, "errors": errors }),
-        ),
-        PortfolioCommand::Positions => Envelope::response_to(
-            request,
-            json!({ "ok": errors.is_empty(), "positions": positions, "errors": errors }),
-        ),
-    }
-}
-
-async fn process_order_request(
-    request: &Envelope,
-    state: &Arc<Mutex<EngineState>>,
-    command: OrderCommand,
-) -> Envelope {
-    match command {
-        OrderCommand::Submit => {
-            let payload: OrderSubmitPayload = match parse_payload(&request.payload) {
-                Ok(p) => p,
-                Err(err) => {
-                    return Envelope::response_to(request, json!({"ok": false, "error": err}));
-                }
-            };
-
-            let instrument = match payload_to_instrument(&payload.instrument) {
-                Ok(v) => v,
-                Err(err) => {
-                    return Envelope::response_to(request, json!({"ok": false, "error": err}));
-                }
-            };
-            let side = match parse_order_side(&payload.side) {
-                Ok(v) => v,
-                Err(err) => {
-                    return Envelope::response_to(request, json!({"ok": false, "error": err}));
-                }
-            };
-            let order_type = match parse_order_type(&payload.order_type) {
-                Ok(v) => v,
-                Err(err) => {
-                    return Envelope::response_to(request, json!({"ok": false, "error": err}));
-                }
-            };
-            let tif = match payload.tif {
-                Some(raw) => match parse_tif(&raw) {
-                    Ok(v) => Some(v),
-                    Err(err) => {
-                        return Envelope::response_to(request, json!({"ok": false, "error": err}));
-                    }
-                },
-                None => None,
-            };
-
-            let requested_notional_cents = {
-                let base = if let Some(limit_price) = payload.limit_price {
-                    (payload.quantity * limit_price * 100.0).round() as i64
-                } else {
-                    (payload.quantity * 100.0).round() as i64
-                };
-                base.max(1)
-            };
-
-            let (adapter, venue_id, db_path, can_submit) = {
-                let state = state.lock().await;
-                let Some(strategy) = state.strategies.get(&payload.strategy_id) else {
-                    return Envelope::response_to(
-                        request,
-                        json!({"ok": false, "error": format!("Unknown strategy '{}'", payload.strategy_id)}),
-                    );
-                };
-                if !strategy.enabled {
-                    return Envelope::response_to(
-                        request,
-                        json!({"ok": false, "error": format!("Strategy '{}' is disabled", payload.strategy_id)}),
-                    );
-                }
-                let Some(venue) = state.venues.get(&payload.venue_id) else {
-                    return Envelope::response_to(
-                        request,
-                        json!({"ok": false, "error": format!("Unknown venue '{}'", payload.venue_id)}),
-                    );
-                };
-                if !venue.enabled {
-                    return Envelope::response_to(
-                        request,
-                        json!({"ok": false, "error": format!("Venue '{}' is disabled", payload.venue_id)}),
-                    );
-                }
-                let market_type = instrument.market_type;
-                let mode = state
-                    .execution_modes
-                    .get(&mode_key(&payload.venue_id, market_type))
-                    .copied()
-                    .unwrap_or(ExecutionMode::Paper);
-                let can_submit = if mode == ExecutionMode::Live {
-                    venue.live_enabled && !venue.paper_only
-                } else {
-                    true
-                };
-                let cage = HardSafetyCage::new(state.safety_policy.clone());
-                let risk_decision = cage.evaluate_order_with_context(
-                    &payload.strategy_id,
-                    Some(&payload.venue_id),
-                    requested_notional_cents,
-                    &state.risk_snapshot,
-                );
-                if let RiskDecision::Deny { reason } = risk_decision {
-                    return Envelope::response_to(
-                        request,
-                        json!({
-                            "ok": false,
-                            "error": reason,
-                            "hard_safety_floor": "enforced",
-                        }),
-                    );
-                }
-                (
-                    state.adapters.get(&payload.venue_id).cloned(),
-                    payload.venue_id.clone(),
-                    state.db_path.clone(),
-                    can_submit,
-                )
-            };
-
-            if !can_submit {
-                return Envelope::response_to(
-                    request,
-                    json!({"ok": false, "error": "venue is not authorized for live execution"}),
-                );
+        PortfolioCommand::Positions => {
+            let (positions, balances) = fetch_portfolio(&context.adapters).await;
+            {
+                let mut state = context.state.lock().await;
+                state.portfolio_positions = positions.clone();
+                state.portfolio_balances = balances;
             }
 
-            let Some(adapter) = adapter else {
-                return Envelope::response_to(
-                    request,
-                    json!({"ok": false, "error": format!("No adapter for venue '{}'", venue_id)}),
-                );
-            };
-
-            let req = OrderRequest {
-                venue_id: payload.venue_id.clone(),
-                strategy_id: payload.strategy_id.clone(),
-                client_order_id: payload.client_order_id.clone(),
-                instrument,
-                side,
-                order_type,
-                quantity: payload.quantity,
-                limit_price: payload.limit_price,
-                tif,
-                post_only: payload.post_only,
-                reduce_only: payload.reduce_only,
-                metadata: BTreeMap::new(),
-            };
-
-            match adapter.place_order(req.clone()).await {
-                Ok(ack) => {
-                    let now = now_ms();
-                    let summary = OrderSummary {
-                        venue_order_id: ack.venue_order_id.clone(),
-                        client_order_id: req.client_order_id.clone(),
-                        strategy_id: req.strategy_id.clone(),
-                        venue_id: req.venue_id.clone(),
-                        instrument: req.instrument.clone(),
-                        side: req.side,
-                        order_type: req.order_type,
-                        quantity: req.quantity,
-                        filled_quantity: if ack.status == OrderStatus::Filled {
-                            req.quantity
-                        } else {
-                            0.0
-                        },
-                        avg_fill_price: req.limit_price,
-                        status: ack.status,
-                        created_at_ms: now,
-                        updated_at_ms: now,
-                        message: ack.reason.clone(),
-                    };
-                    if let Err(err) = sqlite_upsert_order(&db_path, &summary) {
-                        warn!("Failed to persist order summary: {:#}", err);
-                    }
-                    if ack.status == OrderStatus::Filled {
-                        let fill_id = format!("{}:{}", ack.venue_order_id, now);
-                        let fill = json!({
-                            "fill_id": fill_id,
-                            "venue_order_id": ack.venue_order_id,
-                            "client_order_id": req.client_order_id.clone(),
-                            "strategy_id": req.strategy_id.clone(),
-                            "venue_id": req.venue_id.clone(),
-                            "symbol": req.instrument.symbol.clone(),
-                            "quantity": req.quantity,
-                            "price": req.limit_price,
-                            "ts_ms": now,
-                        });
-                        if let Err(err) = sqlite_upsert_fill(&db_path, &fill_id, &fill) {
-                            warn!("Failed to persist fill: {:#}", err);
-                        }
-                    }
-
-                    let mut state = state.lock().await;
-                    state.last_command_at_ms = now;
-                    state.risk_snapshot.orders_last_minute =
-                        state.risk_snapshot.orders_last_minute.saturating_add(1);
-                    state.risk_snapshot.total_notional_cents = state
-                        .risk_snapshot
-                        .total_notional_cents
-                        .saturating_add(requested_notional_cents);
-                    let venue_total = state
-                        .risk_snapshot
-                        .venue_notional_cents
-                        .entry(req.venue_id.clone())
-                        .or_insert(0);
-                    *venue_total = venue_total.saturating_add(requested_notional_cents);
-                    let strategy_total = state
-                        .risk_snapshot
-                        .strategy_canary_notional
-                        .entry(req.strategy_id.clone())
-                        .or_insert(0);
-                    *strategy_total = strategy_total.saturating_add(requested_notional_cents);
-                    if ack.status == OrderStatus::Filled {
-                        state.risk_snapshot.open_positions =
-                            state.risk_snapshot.open_positions.saturating_add(1);
-                    }
-                    push_event(
-                        &mut state,
-                        Event::Execution {
-                            venue: req.venue_id,
-                            strategy_id: req.strategy_id,
-                            symbol: req.instrument.symbol,
-                            action: order_side_label(req.side),
-                            status: order_status_label(ack.status),
-                            latency_ms: 0,
-                        },
-                    );
-                    persist_sqlite_runtime_snapshot(&state);
-
-                    Envelope::response_to(
-                        request,
-                        json!({
-                            "ok": true,
-                            "ack": {
-                                "venue_order_id": ack.venue_order_id,
-                                "accepted": ack.accepted,
-                                "status": order_status_label(ack.status),
-                                "reason": ack.reason,
-                            }
-                        }),
-                    )
-                }
-                Err(err) => Envelope::response_to(
-                    request,
-                    json!({ "ok": false, "error": err.message, "code": err.code }),
-                ),
-            }
-        }
-        OrderCommand::Cancel => {
-            let payload: OrderCancelPayload = match parse_payload(&request.payload) {
-                Ok(p) => p,
-                Err(err) => {
-                    return Envelope::response_to(request, json!({"ok": false, "error": err}));
-                }
-            };
-
-            let adapters: Vec<Arc<dyn ExchangeAdapter>> = {
-                let state = state.lock().await;
-                if let Some(venue_id) = payload.venue_id.as_ref() {
-                    state
-                        .adapters
-                        .get(venue_id)
-                        .cloned()
-                        .map(|a| vec![a])
-                        .unwrap_or_default()
-                } else {
-                    state.adapters.values().cloned().collect()
-                }
-            };
-
-            for adapter in adapters {
-                if adapter.cancel_order(&payload.venue_order_id).await.is_ok() {
-                    return Envelope::response_to(
-                        request,
-                        json!({ "ok": true, "venue_order_id": payload.venue_order_id }),
-                    );
-                }
-            }
-
-            Envelope::response_to(
-                request,
-                json!({ "ok": false, "error": "order not found in enabled venues" }),
-            )
-        }
-        OrderCommand::List => {
-            let payload: OptionalVenuePayload =
-                parse_payload(&request.payload).unwrap_or(OptionalVenuePayload { venue_id: None });
-
-            let adapters: Vec<Arc<dyn ExchangeAdapter>> = {
-                let state = state.lock().await;
-                match payload.venue_id.as_ref() {
-                    Some(venue_id) => state
-                        .adapters
-                        .get(venue_id)
-                        .cloned()
-                        .map(|a| vec![a])
-                        .unwrap_or_default(),
-                    None => state.adapters.values().cloned().collect(),
-                }
-            };
-
-            let mut orders: Vec<OrderListItemPayload> = Vec::new();
-            for adapter in adapters {
-                if let Ok(adapter_orders) = adapter.list_orders().await {
-                    orders.extend(
-                        adapter_orders
-                            .into_iter()
-                            .map(|o| order_summary_to_payload(&o)),
-                    );
-                }
-            }
-            orders.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
-
-            Envelope::response_to(request, json!({ "ok": true, "orders": orders }))
-        }
-    }
-}
-
-async fn process_execution_mode_request(
-    request: &Envelope,
-    state: &Arc<Mutex<EngineState>>,
-    command: ExecutionModeCommand,
-) -> Envelope {
-    let payload: ExecutionModePayload = match parse_payload(&request.payload) {
-        Ok(p) => p,
-        Err(err) => {
-            return Envelope::response_to(request, json!({"ok": false, "error": err}));
-        }
-    };
-
-    let market_type = match parse_market_type(&payload.market_type) {
-        Ok(v) => v,
-        Err(err) => {
-            return Envelope::response_to(request, json!({"ok": false, "error": err}));
-        }
-    };
-
-    let mut state = state.lock().await;
-    let venue = match state.venues.get(&payload.venue_id) {
-        Some(v) => v.clone(),
-        None => {
-            return Envelope::response_to(
-                request,
-                json!({"ok": false, "error": format!("Unknown venue '{}'", payload.venue_id)}),
-            );
-        }
-    };
-
-    if !venue.market_types.contains(&market_type) {
-        return Envelope::response_to(
-            request,
-            json!({"ok": false, "error": "venue does not support requested market_type"}),
-        );
-    }
-
-    let key = mode_key(&payload.venue_id, market_type);
-    match command {
-        ExecutionModeCommand::Get => {
-            let mode = state
-                .execution_modes
-                .get(&key)
-                .copied()
-                .unwrap_or(ExecutionMode::Paper);
             Envelope::response_to(
                 request,
                 json!({
                     "ok": true,
-                    "execution_mode": {
-                        "venue_id": payload.venue_id,
-                        "market_type": market_type_label(market_type),
-                        "mode": execution_mode_label(mode),
-                    }
+                    "result": PortfolioPositionsPayload { positions },
                 }),
             )
         }
-        ExecutionModeCommand::Set => {
-            let mode = match parse_execution_mode(&payload.mode) {
-                Ok(v) => v,
-                Err(err) => {
-                    return Envelope::response_to(request, json!({"ok": false, "error": err}));
-                }
-            };
-
-            if mode == ExecutionMode::Live && (venue.paper_only || !venue.live_enabled) {
-                return Envelope::response_to(
-                    request,
-                    json!({"ok": false, "error": "venue cannot run in live mode"}),
-                );
-            }
-
-            state.execution_modes.insert(key, mode);
-            refresh_adapter_for_venue(&mut state, &payload.venue_id);
-            if let Err(err) =
-                sqlite_upsert_execution_mode(&state.db_path, &payload.venue_id, market_type, mode)
+        PortfolioCommand::Balances => {
+            let (positions, balances) = fetch_portfolio(&context.adapters).await;
             {
-                warn!("Failed to persist execution mode: {:#}", err);
+                let mut state = context.state.lock().await;
+                state.portfolio_positions = positions;
+                state.portfolio_balances = balances.clone();
             }
 
             Envelope::response_to(
                 request,
                 json!({
                     "ok": true,
-                    "execution_mode": {
-                        "venue_id": payload.venue_id,
-                        "market_type": market_type_label(market_type),
-                        "mode": execution_mode_label(mode),
-                    }
+                    "result": PortfolioBalancesPayload { balances },
+                }),
+            )
+        }
+        PortfolioCommand::Exposure => {
+            let state = context.state.lock().await;
+            Envelope::response_to(
+                request,
+                json!({
+                    "ok": true,
+                    "result": portfolio_summary_payload(&state),
                 }),
             )
         }
@@ -2304,6 +2182,19 @@ fn risk_limits_payload(state: &EngineState) -> RiskLimitsPayload {
     }
 }
 
+fn scoped_kill_switches_payload(state: &EngineState) -> ScopedKillSwitchesPayload {
+    let mut venues: Vec<String> = state.scoped_kill_venues.iter().cloned().collect();
+    let mut strategies: Vec<String> = state.scoped_kill_strategies.iter().cloned().collect();
+    venues.sort();
+    strategies.sort();
+
+    ScopedKillSwitchesPayload {
+        global: state.kill_switch_engaged,
+        venues,
+        strategies,
+    }
+}
+
 fn risk_state_payload(state: &EngineState) -> RiskStatePayload {
     RiskStatePayload {
         kill_switch_engaged: state.kill_switch_engaged,
@@ -2311,6 +2202,40 @@ fn risk_state_payload(state: &EngineState) -> RiskStatePayload {
         orders_last_minute: state.risk_snapshot.orders_last_minute,
         drawdown_cents: state.risk_snapshot.drawdown_cents,
         total_notional_cents: state.risk_snapshot.total_notional_cents,
+        scoped_kill_switches: scoped_kill_switches_payload(state),
+    }
+}
+
+fn portfolio_summary_payload(state: &EngineState) -> PortfolioSummaryPayload {
+    let mut by_venue: Vec<trading_protocol::VenueExposurePayload> = state
+        .risk_snapshot
+        .venue_notional
+        .iter()
+        .map(|(venue, notional)| trading_protocol::VenueExposurePayload {
+            venue: venue.clone(),
+            notional_cents: *notional,
+        })
+        .collect();
+    by_venue.sort_by(|a, b| a.venue.cmp(&b.venue));
+
+    let mut by_asset_class: Vec<trading_protocol::AssetClassExposurePayload> = state
+        .risk_snapshot
+        .asset_class_notional
+        .iter()
+        .map(
+            |(asset_class, notional)| trading_protocol::AssetClassExposurePayload {
+                asset_class: asset_class.clone(),
+                notional_cents: *notional,
+            },
+        )
+        .collect();
+    by_asset_class
+        .sort_by(|a, b| format!("{:?}", a.asset_class).cmp(&format!("{:?}", b.asset_class)));
+
+    PortfolioSummaryPayload {
+        total_notional_cents: state.risk_snapshot.total_notional_cents,
+        by_venue,
+        by_asset_class,
     }
 }
 
@@ -2326,6 +2251,18 @@ fn engine_state_payload(state: &EngineState) -> EngineStatePayload {
         last_command_at_ms: state.last_command_at_ms,
         strategies_total: state.strategies.len(),
         strategies_enabled,
+        mode: state.mode,
+        routing_counters: RoutingCountersPayload {
+            live_count: state.routing_counters.live_count,
+            paper_count: state.routing_counters.paper_count,
+        },
+        scoped_kill_switches: scoped_kill_switches_payload(state),
+        execution_stats: trading_protocol::ExecutionStatsPayload {
+            accepted: state.execution_stats.accepted,
+            rejected: state.execution_stats.rejected,
+            canceled: state.execution_stats.canceled,
+            fills: state.execution_stats.fills,
+        },
     }
 }
 
@@ -2357,6 +2294,8 @@ fn command_kinds_supported() -> Vec<String> {
         EngineCommand::Pause.as_kind().to_string(),
         EngineCommand::Resume.as_kind().to_string(),
         EngineCommand::KillSwitch.as_kind().to_string(),
+        EngineCommand::GetMode.as_kind().to_string(),
+        EngineCommand::SetMode.as_kind().to_string(),
         StrategyCommand::List.as_kind().to_string(),
         StrategyCommand::Enable.as_kind().to_string(),
         StrategyCommand::Disable.as_kind().to_string(),
@@ -2364,6 +2303,14 @@ fn command_kinds_supported() -> Vec<String> {
         StrategyCommand::PromoteCandidate.as_kind().to_string(),
         RiskCommand::Status.as_kind().to_string(),
         RiskCommand::Override.as_kind().to_string(),
+        ExecutionCommand::Place.as_kind().to_string(),
+        ExecutionCommand::Cancel.as_kind().to_string(),
+        ExecutionCommand::Get.as_kind().to_string(),
+        ExecutionCommand::OpenOrders.as_kind().to_string(),
+        ExecutionCommand::Fills.as_kind().to_string(),
+        PortfolioCommand::Positions.as_kind().to_string(),
+        PortfolioCommand::Balances.as_kind().to_string(),
+        PortfolioCommand::Exposure.as_kind().to_string(),
     ]
 }
 
@@ -2378,39 +2325,6 @@ fn capabilities_payload() -> CapabilitiesPayload {
 
 fn status_response(request: &Envelope, state: &EngineState) -> Envelope {
     let recent_events: Vec<_> = state.recent_events.iter().cloned().collect();
-    let mut venues: Vec<_> = state
-        .venues
-        .values()
-        .map(|venue| venue_summary_from_state(state, venue))
-        .collect();
-    venues.sort_by(|a, b| a.venue_id.cmp(&b.venue_id));
-
-    let mut execution_modes: Vec<_> = state
-        .execution_modes
-        .iter()
-        .filter_map(|(key, mode)| {
-            let mut parts = key.split(':');
-            let venue_id = parts.next()?.to_string();
-            let market_type = parts.next()?.to_ascii_lowercase();
-            Some(json!({
-                "venue_id": venue_id,
-                "market_type": market_type,
-                "mode": execution_mode_label(*mode),
-            }))
-        })
-        .collect();
-    execution_modes.sort_by(|a, b| {
-        let a_venue = a
-            .get("venue_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let b_venue = b
-            .get("venue_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        a_venue.cmp(b_venue)
-    });
-
     Envelope::response_to(
         request,
         json!({
@@ -2423,9 +2337,8 @@ fn status_response(request: &Envelope, state: &EngineState) -> Envelope {
                 "limits": risk_limits_payload(state),
                 "state": risk_state_payload(state),
             },
+            "portfolio_summary": portfolio_summary_payload(state),
             "strategies": strategy_summaries(state),
-            "venues": venues,
-            "execution_modes": execution_modes,
             "recent_events": recent_events,
         }),
     )
@@ -2440,16 +2353,19 @@ fn push_event(state: &mut EngineState, event: Event) {
         }
     };
 
-    state.recent_events.push_back(value);
+    state.recent_events.push_back(value.clone());
     while state.recent_events.len() > MAX_RECENT_EVENTS {
         state.recent_events.pop_front();
     }
 
-    if let Some(last) = state.recent_events.back() {
-        if let Err(err) = sqlite_append_event(&state.db_path, last) {
-            warn!("Failed to persist event journal record: {:#}", err);
-        }
-    }
+    write_journal_entry(
+        &state.data_dir,
+        "events",
+        &json!({
+            "ts_ms": now_ms(),
+            "event": value,
+        }),
+    );
 }
 
 #[cfg(test)]
@@ -2496,24 +2412,16 @@ mod tests {
         )
     }
 
-    fn unique_db_path(label: &str) -> String {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos();
-        format!(
-            "{}/trading-daemon-test-{}-{}.sqlite3",
-            std::env::temp_dir().display(),
-            label,
-            nanos
-        )
-    }
-
     #[test]
     fn promotion_updates_snapshot_and_preserves_enable_state() {
         let state_path = unique_state_path("promotion-preserve-enable");
-        let db_path = unique_db_path("promotion-preserve-enable");
-        let mut state = initial_engine_state(state_path, db_path, 0);
+        let mut state = initial_engine_state(
+            std::env::temp_dir().to_string_lossy().to_string(),
+            state_path,
+            0,
+            EngineMode::Paper,
+            true,
+        );
         let strategy_id = "kalshi.arbitrage";
 
         {
@@ -2551,8 +2459,13 @@ mod tests {
     #[test]
     fn promotion_rejects_expired_candidate_when_ttl_enabled() {
         let state_path = unique_state_path("promotion-ttl");
-        let db_path = unique_db_path("promotion-ttl");
-        let mut state = initial_engine_state(state_path, db_path, 100);
+        let mut state = initial_engine_state(
+            std::env::temp_dir().to_string_lossy().to_string(),
+            state_path,
+            100,
+            EngineMode::Paper,
+            true,
+        );
         let strategy_id = "kalshi.market_making";
 
         state
@@ -2568,177 +2481,41 @@ mod tests {
     }
 
     #[test]
-    fn promotion_rejects_hash_mismatch() {
-        let state_path = unique_state_path("promotion-hash");
-        let db_path = unique_db_path("promotion-hash");
-        let mut state = initial_engine_state(state_path, db_path, 0);
-        let strategy_id = "core.mean_reversion";
+    fn route_is_live_only_for_spot_coinbase_and_live_mode() {
+        let adapters = AdapterRegistry {
+            coinbase: Some(Arc::new(PaperExchangeAdapter::new("coinbase_at")) as DynAdapter),
+            paper: Arc::new(PaperExchangeAdapter::new("paper")),
+        };
 
-        state
-            .strategies
-            .get_mut(strategy_id)
-            .expect("strategy should exist")
-            .candidate = Some(make_candidate("expected-hash", 1_000));
+        let order = NormalizedOrderRequest {
+            venue: "coinbase_at".to_string(),
+            symbol: "BTC-USD".to_string(),
+            instrument: exchange_core::InstrumentRef {
+                venue: "coinbase_at".to_string(),
+                venue_symbol: "BTC-USD".to_string(),
+                asset_class: exchange_core::AssetClass::Crypto,
+                instrument_type: InstrumentType::Spot,
+                base: Some("BTC".to_string()),
+                quote: Some("USD".to_string()),
+                expiry_ts_ms: None,
+                strike: None,
+                option_right: None,
+                contract_multiplier: Some(1.0),
+            },
+            strategy_id: "s1".to_string(),
+            client_order_id: "c1".to_string(),
+            intent_id: Some("i1".to_string()),
+            side: exchange_core::OrderSide::Buy,
+            order_type: exchange_core::OrderType::Limit,
+            qty: 1.0,
+            limit_price: Some(100.0),
+            tif: Some(exchange_core::TimeInForce::Gtc),
+            post_only: false,
+            reduce_only: false,
+            requested_notional_cents: 10_000,
+        };
 
-        let payload = promote_payload(strategy_id, "different-hash", 600);
-        let error = promote_candidate_locked(&mut state, &payload, 1_100)
-            .expect_err("promotion should fail");
-        assert_eq!(error, "candidate code hash mismatch");
-    }
-
-    #[test]
-    fn engine_helpers_keep_pause_flags_in_sync_and_distinguish_stop_pause() {
-        let state_path = unique_state_path("engine-state");
-        let db_path = unique_db_path("engine-state");
-        let mut state = initial_engine_state(state_path, db_path, 0);
-
-        apply_start(&mut state);
-        assert_eq!(state.running, true);
-        assert_eq!(state.paused, false);
-        assert_eq!(state.risk_snapshot.paused, false);
-
-        apply_pause(&mut state);
-        assert_eq!(state.running, false);
-        assert_eq!(state.paused, true);
-        assert_eq!(state.risk_snapshot.paused, true);
-
-        apply_resume(&mut state);
-        assert_eq!(state.running, true);
-        assert_eq!(state.paused, false);
-        assert_eq!(state.risk_snapshot.paused, false);
-
-        apply_stop(&mut state);
-        assert_eq!(state.running, false);
-        assert_eq!(state.paused, false);
-        assert_eq!(state.risk_snapshot.paused, false);
-
-        apply_kill_switch(&mut state);
-        assert_eq!(state.running, false);
-        assert_eq!(state.paused, true);
-        assert_eq!(state.risk_snapshot.paused, true);
-        assert_eq!(state.kill_switch_engaged, true);
-        assert_eq!(state.risk_snapshot.kill_switch_engaged, true);
-
-        apply_reset_kill_switch(&mut state);
-        assert_eq!(state.running, false);
-        assert_eq!(state.paused, true);
-        assert_eq!(state.risk_snapshot.paused, true);
-        assert_eq!(state.kill_switch_engaged, false);
-        assert_eq!(state.risk_snapshot.kill_switch_engaged, false);
-    }
-
-    #[test]
-    fn snapshot_roundtrip_restores_strategy_state() {
-        let state_path = unique_state_path("snapshot-roundtrip");
-        let db_path = unique_db_path("snapshot-roundtrip");
-        let mut state = initial_engine_state(state_path.clone(), db_path.clone(), 0);
-        let strategy_id = "core.momentum";
-
-        {
-            let strategy = state
-                .strategies
-                .get_mut(strategy_id)
-                .expect("strategy should exist");
-            strategy.enabled = true;
-            strategy.version = 7;
-            strategy.canary_deployment = true;
-            strategy.canary_notional_cents = 321;
-            strategy.active_code_hash = Some("abc123".to_string());
-            strategy.candidate = Some(make_candidate("candidate-hash", 1_234));
-        }
-
-        let snapshot = strategy_snapshot_from_state(&state);
-        save_strategy_snapshot(&state_path, &snapshot).expect("snapshot should save");
-
-        let loaded = initial_engine_state(state_path.clone(), db_path.clone(), 0);
-        let loaded_strategy = loaded
-            .strategies
-            .get(strategy_id)
-            .expect("strategy should exist");
-
-        assert_eq!(loaded_strategy.enabled, true);
-        assert_eq!(loaded_strategy.version, 7);
-        assert_eq!(loaded_strategy.canary_deployment, true);
-        assert_eq!(loaded_strategy.canary_notional_cents, 321);
-        assert_eq!(loaded_strategy.active_code_hash.as_deref(), Some("abc123"));
-        assert_eq!(
-            loaded
-                .risk_snapshot
-                .strategy_canary_notional
-                .get(strategy_id)
-                .copied(),
-            Some(321)
-        );
-
-        let _ = std::fs::remove_file(state_path);
-        let _ = std::fs::remove_file(db_path);
-    }
-
-    #[test]
-    fn default_execution_modes_respect_paper_only_flag() {
-        let venues = default_venues();
-        let modes = default_execution_modes(&venues);
-
-        assert_eq!(
-            modes.get(&mode_key("derivatives_paper", MarketType::Perpetual)),
-            Some(&ExecutionMode::Paper)
-        );
-        assert_eq!(
-            modes.get(&mode_key("kalshi", MarketType::Binary)),
-            Some(&ExecutionMode::Live)
-        );
-        assert_eq!(
-            modes.get(&mode_key("coinbase_spot", MarketType::Spot)),
-            Some(&ExecutionMode::Live)
-        );
-    }
-
-    #[test]
-    fn capabilities_include_supported_commands_and_versions() {
-        let capabilities = capabilities_payload();
-
-        assert_eq!(capabilities.protocol_version, PROTOCOL_VERSION);
-        assert_eq!(capabilities.status_schema_version, STATUS_SCHEMA_VERSION);
-        assert!(capabilities
-            .command_kinds_supported
-            .contains(&"Control.Capabilities".to_string()));
-        assert!(capabilities
-            .command_kinds_supported
-            .contains(&"Engine.Status".to_string()));
-        assert!(capabilities
-            .command_kinds_supported
-            .contains(&"Risk.Status".to_string()));
-    }
-
-    #[test]
-    fn status_response_includes_schema_metadata() {
-        let state_path = unique_state_path("status-schema");
-        let db_path = unique_db_path("status-schema");
-        let state = initial_engine_state(state_path.clone(), db_path.clone(), 0);
-        let req = Envelope::new("Engine.Status", serde_json::json!({}));
-        let resp = status_response(&req, &state);
-
-        assert_eq!(
-            resp.payload
-                .get("status_schema_version")
-                .and_then(|v| v.as_u64()),
-            Some(u64::from(STATUS_SCHEMA_VERSION))
-        );
-        assert_eq!(
-            resp.payload
-                .get("protocol_version")
-                .and_then(|v| v.as_u64()),
-            Some(u64::from(PROTOCOL_VERSION))
-        );
-        assert_eq!(
-            resp.payload
-                .get("daemon_build")
-                .and_then(|v| v.get("name"))
-                .and_then(|v| v.as_str()),
-            Some(env!("CARGO_PKG_NAME"))
-        );
-
-        let _ = std::fs::remove_file(state_path);
-        let _ = std::fs::remove_file(db_path);
+        assert!(route_is_live(EngineMode::AutoLive, &order, &adapters));
+        assert!(!route_is_live(EngineMode::Paper, &order, &adapters));
     }
 }

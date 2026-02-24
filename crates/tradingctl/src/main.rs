@@ -1,14 +1,20 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use exchange_core::{
+    AssetClass, InstrumentRef, InstrumentType, NormalizedOrderRequest, OptionRight, OrderSide,
+    OrderType, TimeInForce,
+};
 use futures::{SinkExt, StreamExt};
 use tokio::net::UnixStream;
 use tokio_util::codec::Framed;
 use trading_protocol::{
     create_codec, CandidatePromotePayload, CandidateUploadPayload, ControlCommand, EngineCommand,
-    Envelope, ExecutionModeCommand, ExecutionModePayload, InstrumentRefPayload, OrderCancelPayload,
-    OrderCommand, OrderSubmitPayload, PortfolioCommand, RiskCommand, RiskOverridePayload,
-    StrategyCommand, VenueCommand, VenueTogglePayload, DEFAULT_SOCKET_PATH,
+    EngineMode, EngineModePayload, Envelope, ExecutionCancelPayload, ExecutionCommand,
+    ExecutionFillsPayload, ExecutionGetPayload, ExecutionPlacePayload, PortfolioCommand,
+    RiskCommand, RiskOverridePayload, RiskScopedOverridePayload, StrategyCommand,
+    DEFAULT_SOCKET_PATH,
 };
+use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "tradingctl")]
@@ -20,6 +26,135 @@ struct Cli {
 
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ModeArg {
+    Paper,
+    HitlLive,
+    AutoLive,
+}
+
+impl From<ModeArg> for EngineMode {
+    fn from(value: ModeArg) -> Self {
+        match value {
+            ModeArg::Paper => EngineMode::Paper,
+            ModeArg::HitlLive => EngineMode::HitlLive,
+            ModeArg::AutoLive => EngineMode::AutoLive,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AssetClassArg {
+    Crypto,
+    Equity,
+    Prediction,
+    Fx,
+    Rates,
+    Commodity,
+    Custom,
+}
+
+impl From<AssetClassArg> for AssetClass {
+    fn from(value: AssetClassArg) -> Self {
+        match value {
+            AssetClassArg::Crypto => AssetClass::Crypto,
+            AssetClassArg::Equity => AssetClass::Equity,
+            AssetClassArg::Prediction => AssetClass::Prediction,
+            AssetClassArg::Fx => AssetClass::Fx,
+            AssetClassArg::Rates => AssetClass::Rates,
+            AssetClassArg::Commodity => AssetClass::Commodity,
+            AssetClassArg::Custom => AssetClass::Custom,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum InstrumentTypeArg {
+    Spot,
+    Perpetual,
+    Future,
+    Option,
+    BinaryOption,
+    Custom,
+}
+
+impl From<InstrumentTypeArg> for InstrumentType {
+    fn from(value: InstrumentTypeArg) -> Self {
+        match value {
+            InstrumentTypeArg::Spot => InstrumentType::Spot,
+            InstrumentTypeArg::Perpetual => InstrumentType::Perpetual,
+            InstrumentTypeArg::Future => InstrumentType::Future,
+            InstrumentTypeArg::Option => InstrumentType::Option,
+            InstrumentTypeArg::BinaryOption => InstrumentType::BinaryOption,
+            InstrumentTypeArg::Custom => InstrumentType::Custom,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SideArg {
+    Buy,
+    Sell,
+}
+
+impl From<SideArg> for OrderSide {
+    fn from(value: SideArg) -> Self {
+        match value {
+            SideArg::Buy => OrderSide::Buy,
+            SideArg::Sell => OrderSide::Sell,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OrderTypeArg {
+    Limit,
+    Market,
+}
+
+impl From<OrderTypeArg> for OrderType {
+    fn from(value: OrderTypeArg) -> Self {
+        match value {
+            OrderTypeArg::Limit => OrderType::Limit,
+            OrderTypeArg::Market => OrderType::Market,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TifArg {
+    Gtc,
+    Ioc,
+    Fok,
+    Day,
+}
+
+impl From<TifArg> for TimeInForce {
+    fn from(value: TifArg) -> Self {
+        match value {
+            TifArg::Gtc => TimeInForce::Gtc,
+            TifArg::Ioc => TimeInForce::Ioc,
+            TifArg::Fok => TimeInForce::Fok,
+            TifArg::Day => TimeInForce::Day,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OptionRightArg {
+    Call,
+    Put,
+}
+
+impl From<OptionRightArg> for OptionRight {
+    fn from(value: OptionRightArg) -> Self {
+        match value {
+            OptionRightArg::Call => OptionRight::Call,
+            OptionRightArg::Put => OptionRight::Put,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -42,6 +177,13 @@ enum Commands {
     Resume,
     /// Send Engine.KillSwitch command
     KillSwitch,
+    /// Send Engine.GetMode command
+    EngineGetMode,
+    /// Send Engine.SetMode command
+    EngineSetMode {
+        #[arg(long, value_enum)]
+        mode: ModeArg,
+    },
     /// Send Strategy.List command
     StrategyList,
     /// Send Strategy.Enable command
@@ -95,85 +237,94 @@ enum Commands {
         /// JSON value or raw string
         #[arg(long)]
         value: Option<String>,
+        #[arg(long)]
+        venue: Option<String>,
+        #[arg(long)]
+        strategy_id: Option<String>,
     },
-    /// Send Venue.List command
-    VenueList,
-    /// Send Venue.Enable command
-    VenueEnable {
+    /// Send Risk.Override with scoped payload convenience
+    RiskScoped {
         #[arg(long)]
-        venue_id: String,
+        action: String,
+        #[arg(long)]
+        venue: Option<String>,
+        #[arg(long)]
+        strategy_id: Option<String>,
+        #[arg(long)]
+        value: Option<String>,
     },
-    /// Send Venue.Disable command
-    VenueDisable {
-        #[arg(long)]
-        venue_id: String,
-    },
-    /// Send Venue.Status command
-    VenueStatus {
-        #[arg(long)]
-        venue_id: String,
-    },
-    /// Send Portfolio.Balances command
-    PortfolioBalances,
-    /// Send Portfolio.Positions command
-    PortfolioPositions,
-    /// Send Order.Submit command
-    OrderSubmit {
-        #[arg(long)]
-        strategy_id: String,
-        #[arg(long)]
-        venue_id: String,
+    /// Send Execution.Place command
+    ExecutionPlace {
+        #[arg(long, default_value = "coinbase_at")]
+        venue: String,
         #[arg(long)]
         symbol: String,
         #[arg(long)]
-        asset_class: String,
+        strategy_id: String,
         #[arg(long)]
-        market_type: String,
+        client_order_id: Option<String>,
         #[arg(long)]
-        side: String,
+        intent_id: Option<String>,
+        #[arg(long, value_enum)]
+        side: SideArg,
+        #[arg(long, value_enum)]
+        order_type: OrderTypeArg,
         #[arg(long)]
-        order_type: String,
-        #[arg(long)]
-        quantity: f64,
+        qty: f64,
         #[arg(long)]
         limit_price: Option<f64>,
-        #[arg(long)]
-        tif: Option<String>,
+        #[arg(long, value_enum)]
+        tif: Option<TifArg>,
         #[arg(long, default_value_t = false)]
         post_only: bool,
         #[arg(long, default_value_t = false)]
         reduce_only: bool,
+        #[arg(long, value_enum, default_value_t = AssetClassArg::Crypto)]
+        asset_class: AssetClassArg,
+        #[arg(long, value_enum, default_value_t = InstrumentTypeArg::Spot)]
+        instrument_type: InstrumentTypeArg,
         #[arg(long)]
-        client_order_id: String,
+        base: Option<String>,
+        #[arg(long)]
+        quote: Option<String>,
+        #[arg(long)]
+        expiry_ts_ms: Option<i64>,
+        #[arg(long)]
+        strike: Option<f64>,
+        #[arg(long, value_enum)]
+        option_right: Option<OptionRightArg>,
+        #[arg(long)]
+        contract_multiplier: Option<f64>,
+        #[arg(long, default_value_t = 0)]
+        requested_notional_cents: i64,
+        #[arg(long)]
+        approval_token: Option<String>,
     },
-    /// Send Order.Cancel command
-    OrderCancel {
+    /// Send Execution.Cancel command
+    ExecutionCancel {
         #[arg(long)]
         venue_order_id: String,
-        #[arg(long)]
-        venue_id: Option<String>,
     },
-    /// Send Order.List command
-    OrderList {
+    /// Send Execution.Get command
+    ExecutionGet {
         #[arg(long)]
-        venue_id: Option<String>,
+        venue_order_id: String,
     },
-    /// Send ExecutionMode.Get command
-    ExecutionModeGet {
+    /// Send Execution.OpenOrders command
+    ExecutionOpenOrders,
+    /// Send Execution.Fills command
+    ExecutionFills {
         #[arg(long)]
-        venue_id: String,
-        #[arg(long)]
-        market_type: String,
+        since_ts_ms: Option<i64>,
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
     },
-    /// Send ExecutionMode.Set command
-    ExecutionModeSet {
-        #[arg(long)]
-        venue_id: String,
-        #[arg(long)]
-        market_type: String,
-        #[arg(long)]
-        mode: String,
-    },
+    /// Send Portfolio.Positions command
+    PortfolioPositions,
+    /// Send Portfolio.Balances command
+    PortfolioBalances,
+    /// Send Portfolio.Exposure command
+    PortfolioExposure,
     /// Send a raw JSON command
     Raw {
         #[arg(short, long)]
@@ -218,6 +369,14 @@ async fn main() -> Result<()> {
         Commands::Pause => (EngineCommand::Pause.as_kind(), serde_json::json!({})),
         Commands::Resume => (EngineCommand::Resume.as_kind(), serde_json::json!({})),
         Commands::KillSwitch => (EngineCommand::KillSwitch.as_kind(), serde_json::json!({})),
+        Commands::EngineGetMode => (EngineCommand::GetMode.as_kind(), serde_json::json!({})),
+        Commands::EngineSetMode { mode } => {
+            let payload = EngineModePayload { mode: mode.into() };
+            (
+                EngineCommand::SetMode.as_kind(),
+                serde_json::to_value(payload)?,
+            )
+        }
         Commands::StrategyList => (StrategyCommand::List.as_kind(), serde_json::json!({})),
         Commands::StrategyEnable { strategy_id } => (
             StrategyCommand::Enable.as_kind(),
@@ -272,11 +431,36 @@ async fn main() -> Result<()> {
             )
         }
         Commands::RiskStatus => (RiskCommand::Status.as_kind(), serde_json::json!({})),
-        Commands::RiskOverride { action, value } => {
+        Commands::RiskOverride {
+            action,
+            value,
+            venue,
+            strategy_id,
+        } => {
             let parsed_value = value.as_ref().map(|raw| parse_risk_override_value(raw));
 
             let payload = RiskOverridePayload {
                 action,
+                value: parsed_value,
+                venue,
+                strategy_id,
+            };
+            (
+                RiskCommand::Override.as_kind(),
+                serde_json::to_value(payload)?,
+            )
+        }
+        Commands::RiskScoped {
+            action,
+            venue,
+            strategy_id,
+            value,
+        } => {
+            let parsed_value = value.as_ref().map(|raw| parse_risk_override_value(raw));
+            let payload = RiskScopedOverridePayload {
+                action,
+                venue,
+                strategy_id,
                 value: parsed_value,
             };
             (
@@ -284,103 +468,107 @@ async fn main() -> Result<()> {
                 serde_json::to_value(payload)?,
             )
         }
-        Commands::VenueList => (VenueCommand::List.as_kind(), serde_json::json!({})),
-        Commands::VenueEnable { venue_id } => (
-            VenueCommand::Enable.as_kind(),
-            serde_json::to_value(VenueTogglePayload { venue_id })?,
-        ),
-        Commands::VenueDisable { venue_id } => (
-            VenueCommand::Disable.as_kind(),
-            serde_json::to_value(VenueTogglePayload { venue_id })?,
-        ),
-        Commands::VenueStatus { venue_id } => (
-            VenueCommand::Status.as_kind(),
-            serde_json::to_value(VenueTogglePayload { venue_id })?,
-        ),
-        Commands::PortfolioBalances => {
-            (PortfolioCommand::Balances.as_kind(), serde_json::json!({}))
-        }
-        Commands::PortfolioPositions => {
-            (PortfolioCommand::Positions.as_kind(), serde_json::json!({}))
-        }
-        Commands::OrderSubmit {
-            strategy_id,
-            venue_id,
+        Commands::ExecutionPlace {
+            venue,
             symbol,
-            asset_class,
-            market_type,
+            strategy_id,
+            client_order_id,
+            intent_id,
             side,
             order_type,
-            quantity,
+            qty,
             limit_price,
             tif,
             post_only,
             reduce_only,
-            client_order_id,
+            asset_class,
+            instrument_type,
+            base,
+            quote,
+            expiry_ts_ms,
+            strike,
+            option_right,
+            contract_multiplier,
+            requested_notional_cents,
+            approval_token,
         } => {
-            let payload = OrderSubmitPayload {
+            let client_order_id =
+                client_order_id.unwrap_or_else(|| format!("ctl-{}", Uuid::new_v4().as_simple()));
+            let instrument = InstrumentRef {
+                venue: venue.clone(),
+                venue_symbol: symbol.clone(),
+                asset_class: asset_class.into(),
+                instrument_type: instrument_type.into(),
+                base,
+                quote,
+                expiry_ts_ms,
+                strike,
+                option_right: option_right.map(Into::into),
+                contract_multiplier,
+            };
+            let order = NormalizedOrderRequest {
+                venue,
+                symbol,
+                instrument,
                 strategy_id,
-                venue_id: venue_id.clone(),
-                instrument: InstrumentRefPayload {
-                    venue_id,
-                    symbol,
-                    asset_class,
-                    market_type,
-                    expiry_ts_ms: None,
-                    strike: None,
-                    option_type: None,
-                },
-                side,
-                order_type,
-                quantity,
+                client_order_id,
+                intent_id,
+                side: side.into(),
+                order_type: order_type.into(),
+                qty,
                 limit_price,
-                tif,
+                tif: tif.map(Into::into),
                 post_only,
                 reduce_only,
-                client_order_id,
+                requested_notional_cents,
             };
+            let payload = ExecutionPlacePayload {
+                order,
+                approval_token,
+            };
+
             (
-                OrderCommand::Submit.as_kind(),
+                ExecutionCommand::Place.as_kind(),
                 serde_json::to_value(payload)?,
             )
         }
-        Commands::OrderCancel {
-            venue_order_id,
-            venue_id,
-        } => (
-            OrderCommand::Cancel.as_kind(),
-            serde_json::to_value(OrderCancelPayload {
-                venue_id,
-                venue_order_id,
-            })?,
+        Commands::ExecutionCancel { venue_order_id } => {
+            let payload = ExecutionCancelPayload { venue_order_id };
+            (
+                ExecutionCommand::Cancel.as_kind(),
+                serde_json::to_value(payload)?,
+            )
+        }
+        Commands::ExecutionGet { venue_order_id } => {
+            let payload = ExecutionGetPayload { venue_order_id };
+            (
+                ExecutionCommand::Get.as_kind(),
+                serde_json::to_value(payload)?,
+            )
+        }
+        Commands::ExecutionOpenOrders => (
+            ExecutionCommand::OpenOrders.as_kind(),
+            serde_json::json!({}),
         ),
-        Commands::OrderList { venue_id } => (
-            OrderCommand::List.as_kind(),
-            serde_json::json!({ "venue_id": venue_id }),
-        ),
-        Commands::ExecutionModeGet {
-            venue_id,
-            market_type,
-        } => (
-            ExecutionModeCommand::Get.as_kind(),
-            serde_json::to_value(ExecutionModePayload {
-                venue_id,
-                market_type,
-                mode: String::new(),
-            })?,
-        ),
-        Commands::ExecutionModeSet {
-            venue_id,
-            market_type,
-            mode,
-        } => (
-            ExecutionModeCommand::Set.as_kind(),
-            serde_json::to_value(ExecutionModePayload {
-                venue_id,
-                market_type,
-                mode,
-            })?,
-        ),
+        Commands::ExecutionFills { since_ts_ms, limit } => {
+            let payload = ExecutionFillsPayload {
+                since_ts_ms,
+                limit: Some(limit),
+            };
+            (
+                ExecutionCommand::Fills.as_kind(),
+                serde_json::to_value(payload)?,
+            )
+        }
+        Commands::PortfolioPositions => {
+            (PortfolioCommand::Positions.as_kind(), serde_json::json!({}))
+        }
+        Commands::PortfolioBalances => {
+            (PortfolioCommand::Balances.as_kind(), serde_json::json!({}))
+        }
+        Commands::PortfolioExposure => {
+            (PortfolioCommand::Exposure.as_kind(), serde_json::json!({}))
+        }
         Commands::Raw { json } => ("Control.Raw", serde_json::from_str(&json)?),
     };
 

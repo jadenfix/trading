@@ -1,9 +1,13 @@
+use exchange_core::{
+    AssetClass, BalanceSnapshot, FillReport, NormalizedOrderRequest, OpenOrderSnapshot, OrderAck,
+    OrderSnapshot, PositionSnapshot,
+};
 use serde::{Deserialize, Serialize};
 use tokio_util::codec::LengthDelimitedCodec;
 use uuid::Uuid;
 
 pub const PROTOCOL_VERSION: u8 = 1;
-pub const STATUS_SCHEMA_VERSION: u16 = 2;
+pub const STATUS_SCHEMA_VERSION: u16 = 3;
 pub const DEFAULT_SOCKET_PATH: &str = "/var/run/openclaw/trading.sock";
 pub const MAX_FRAME_LENGTH: usize = 1024 * 1024; // 1 MiB
 
@@ -87,6 +91,26 @@ impl ControlCommand {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineMode {
+    #[serde(rename = "paper")]
+    Paper,
+    #[serde(rename = "hitl_live")]
+    HitlLive,
+    #[serde(rename = "auto_live")]
+    AutoLive,
+}
+
+impl EngineMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Paper => "paper",
+            Self::HitlLive => "hitl_live",
+            Self::AutoLive => "auto_live",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineCommand {
     #[serde(rename = "Engine.Status")]
     Status,
@@ -96,6 +120,10 @@ pub enum EngineCommand {
     Resume,
     #[serde(rename = "Engine.KillSwitch")]
     KillSwitch,
+    #[serde(rename = "Engine.GetMode")]
+    GetMode,
+    #[serde(rename = "Engine.SetMode")]
+    SetMode,
 }
 
 impl EngineCommand {
@@ -105,6 +133,8 @@ impl EngineCommand {
             Self::Pause => "Engine.Pause",
             Self::Resume => "Engine.Resume",
             Self::KillSwitch => "Engine.KillSwitch",
+            Self::GetMode => "Engine.GetMode",
+            Self::SetMode => "Engine.SetMode",
         }
     }
 
@@ -114,6 +144,8 @@ impl EngineCommand {
             "Engine.Pause" => Some(Self::Pause),
             "Engine.Resume" => Some(Self::Resume),
             "Engine.KillSwitch" => Some(Self::KillSwitch),
+            "Engine.GetMode" => Some(Self::GetMode),
+            "Engine.SetMode" => Some(Self::SetMode),
             _ => None,
         }
     }
@@ -182,33 +214,37 @@ impl RiskCommand {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VenueCommand {
-    #[serde(rename = "Venue.List")]
-    List,
-    #[serde(rename = "Venue.Enable")]
-    Enable,
-    #[serde(rename = "Venue.Disable")]
-    Disable,
-    #[serde(rename = "Venue.Status")]
-    Status,
+pub enum ExecutionCommand {
+    #[serde(rename = "Execution.Place")]
+    Place,
+    #[serde(rename = "Execution.Cancel")]
+    Cancel,
+    #[serde(rename = "Execution.Get")]
+    Get,
+    #[serde(rename = "Execution.OpenOrders")]
+    OpenOrders,
+    #[serde(rename = "Execution.Fills")]
+    Fills,
 }
 
-impl VenueCommand {
+impl ExecutionCommand {
     pub fn as_kind(self) -> &'static str {
         match self {
-            Self::List => "Venue.List",
-            Self::Enable => "Venue.Enable",
-            Self::Disable => "Venue.Disable",
-            Self::Status => "Venue.Status",
+            Self::Place => "Execution.Place",
+            Self::Cancel => "Execution.Cancel",
+            Self::Get => "Execution.Get",
+            Self::OpenOrders => "Execution.OpenOrders",
+            Self::Fills => "Execution.Fills",
         }
     }
 
     pub fn from_kind(kind: &str) -> Option<Self> {
         match kind {
-            "Venue.List" => Some(Self::List),
-            "Venue.Enable" => Some(Self::Enable),
-            "Venue.Disable" => Some(Self::Disable),
-            "Venue.Status" => Some(Self::Status),
+            "Execution.Place" => Some(Self::Place),
+            "Execution.Cancel" => Some(Self::Cancel),
+            "Execution.Get" => Some(Self::Get),
+            "Execution.OpenOrders" => Some(Self::OpenOrders),
+            "Execution.Fills" => Some(Self::Fills),
             _ => None,
         }
     }
@@ -216,78 +252,28 @@ impl VenueCommand {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortfolioCommand {
-    #[serde(rename = "Portfolio.Balances")]
-    Balances,
     #[serde(rename = "Portfolio.Positions")]
     Positions,
+    #[serde(rename = "Portfolio.Balances")]
+    Balances,
+    #[serde(rename = "Portfolio.Exposure")]
+    Exposure,
 }
 
 impl PortfolioCommand {
     pub fn as_kind(self) -> &'static str {
         match self {
-            Self::Balances => "Portfolio.Balances",
             Self::Positions => "Portfolio.Positions",
+            Self::Balances => "Portfolio.Balances",
+            Self::Exposure => "Portfolio.Exposure",
         }
     }
 
     pub fn from_kind(kind: &str) -> Option<Self> {
         match kind {
-            "Portfolio.Balances" => Some(Self::Balances),
             "Portfolio.Positions" => Some(Self::Positions),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OrderCommand {
-    #[serde(rename = "Order.Submit")]
-    Submit,
-    #[serde(rename = "Order.Cancel")]
-    Cancel,
-    #[serde(rename = "Order.List")]
-    List,
-}
-
-impl OrderCommand {
-    pub fn as_kind(self) -> &'static str {
-        match self {
-            Self::Submit => "Order.Submit",
-            Self::Cancel => "Order.Cancel",
-            Self::List => "Order.List",
-        }
-    }
-
-    pub fn from_kind(kind: &str) -> Option<Self> {
-        match kind {
-            "Order.Submit" => Some(Self::Submit),
-            "Order.Cancel" => Some(Self::Cancel),
-            "Order.List" => Some(Self::List),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecutionModeCommand {
-    #[serde(rename = "ExecutionMode.Set")]
-    Set,
-    #[serde(rename = "ExecutionMode.Get")]
-    Get,
-}
-
-impl ExecutionModeCommand {
-    pub fn as_kind(self) -> &'static str {
-        match self {
-            Self::Set => "ExecutionMode.Set",
-            Self::Get => "ExecutionMode.Get",
-        }
-    }
-
-    pub fn from_kind(kind: &str) -> Option<Self> {
-        match kind {
-            "ExecutionMode.Set" => Some(Self::Set),
-            "ExecutionMode.Get" => Some(Self::Get),
+            "Portfolio.Balances" => Some(Self::Balances),
+            "Portfolio.Exposure" => Some(Self::Exposure),
             _ => None,
         }
     }
@@ -299,10 +285,8 @@ pub enum RequestKind {
     Engine(EngineCommand),
     Strategy(StrategyCommand),
     Risk(RiskCommand),
-    Venue(VenueCommand),
+    Execution(ExecutionCommand),
     Portfolio(PortfolioCommand),
-    Order(OrderCommand),
-    ExecutionMode(ExecutionModeCommand),
 }
 
 impl RequestKind {
@@ -319,17 +303,51 @@ impl RequestKind {
         if let Some(cmd) = RiskCommand::from_kind(kind) {
             return Some(Self::Risk(cmd));
         }
-        if let Some(cmd) = VenueCommand::from_kind(kind) {
-            return Some(Self::Venue(cmd));
+        if let Some(cmd) = ExecutionCommand::from_kind(kind) {
+            return Some(Self::Execution(cmd));
         }
-        if let Some(cmd) = PortfolioCommand::from_kind(kind) {
-            return Some(Self::Portfolio(cmd));
-        }
-        if let Some(cmd) = OrderCommand::from_kind(kind) {
-            return Some(Self::Order(cmd));
-        }
-        ExecutionModeCommand::from_kind(kind).map(Self::ExecutionMode)
+        PortfolioCommand::from_kind(kind).map(Self::Portfolio)
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RoutingCountersPayload {
+    pub live_count: u64,
+    pub paper_count: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ScopedKillSwitchesPayload {
+    pub global: bool,
+    pub venues: Vec<String>,
+    pub strategies: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExecutionStatsPayload {
+    pub accepted: u64,
+    pub rejected: u64,
+    pub canceled: u64,
+    pub fills: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VenueExposurePayload {
+    pub venue: String,
+    pub notional_cents: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AssetClassExposurePayload {
+    pub asset_class: AssetClass,
+    pub notional_cents: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PortfolioSummaryPayload {
+    pub total_notional_cents: i64,
+    pub by_venue: Vec<VenueExposurePayload>,
+    pub by_asset_class: Vec<AssetClassExposurePayload>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -342,6 +360,10 @@ pub struct EngineStatePayload {
     pub last_command_at_ms: i64,
     pub strategies_total: usize,
     pub strategies_enabled: usize,
+    pub mode: EngineMode,
+    pub routing_counters: RoutingCountersPayload,
+    pub scoped_kill_switches: ScopedKillSwitchesPayload,
+    pub execution_stats: ExecutionStatsPayload,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -408,103 +430,57 @@ pub struct RiskStatePayload {
     pub orders_last_minute: u32,
     pub drawdown_cents: i64,
     pub total_notional_cents: i64,
+    pub scoped_kill_switches: ScopedKillSwitchesPayload,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RiskOverridePayload {
     pub action: String,
     pub value: Option<serde_json::Value>,
+    pub venue: Option<String>,
+    pub strategy_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct VenueTogglePayload {
-    pub venue_id: String,
+pub struct RiskScopedOverridePayload {
+    pub action: String,
+    pub venue: Option<String>,
+    pub strategy_id: Option<String>,
+    pub value: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct VenueSummaryPayload {
-    pub venue_id: String,
-    pub enabled: bool,
-    pub market_types: Vec<String>,
-    pub healthy: bool,
-    pub live_enabled: bool,
-    pub paper_only: bool,
-    pub message: Option<String>,
+pub struct EngineModePayload {
+    pub mode: EngineMode,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct InstrumentRefPayload {
-    pub venue_id: String,
-    pub symbol: String,
-    pub asset_class: String,
-    pub market_type: String,
-    pub expiry_ts_ms: Option<i64>,
-    pub strike: Option<f64>,
-    pub option_type: Option<String>,
+pub struct ExecutionPlacePayload {
+    pub order: NormalizedOrderRequest,
+    pub approval_token: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct PortfolioBalancePayload {
-    pub venue_id: String,
-    pub asset: String,
-    pub total: f64,
-    pub available: f64,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct PortfolioPositionPayload {
-    pub venue_id: String,
-    pub instrument: InstrumentRefPayload,
-    pub quantity: f64,
-    pub avg_price: f64,
-    pub mark_price: Option<f64>,
-    pub unrealized_pnl: Option<f64>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct OrderSubmitPayload {
-    pub strategy_id: String,
-    pub venue_id: String,
-    pub instrument: InstrumentRefPayload,
-    pub side: String,
-    pub order_type: String,
-    pub quantity: f64,
-    pub limit_price: Option<f64>,
-    pub tif: Option<String>,
-    pub post_only: bool,
-    pub reduce_only: bool,
-    pub client_order_id: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct OrderCancelPayload {
-    pub venue_id: Option<String>,
+pub struct ExecutionCancelPayload {
     pub venue_order_id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct OrderListItemPayload {
+pub struct ExecutionGetPayload {
     pub venue_order_id: String,
-    pub client_order_id: String,
-    pub strategy_id: String,
-    pub venue_id: String,
-    pub instrument: InstrumentRefPayload,
-    pub side: String,
-    pub order_type: String,
-    pub quantity: f64,
-    pub filled_quantity: f64,
-    pub avg_fill_price: Option<f64>,
-    pub status: String,
-    pub created_at_ms: i64,
-    pub updated_at_ms: i64,
-    pub message: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ExecutionModePayload {
-    pub venue_id: String,
-    pub market_type: String,
-    pub mode: String,
+pub struct ExecutionFillsPayload {
+    pub since_ts_ms: Option<i64>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExecutionPlaceResultPayload {
+    pub ack: OrderAck,
+    pub order: Option<OrderSnapshot>,
+    pub fill: Option<FillReport>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -541,6 +517,8 @@ pub enum Event {
         action: String,
         status: String,
         latency_ms: u64,
+        simulated: bool,
+        venue_order_id: Option<String>,
     },
     #[serde(rename = "Event.AgentCodegen")]
     AgentCodegen {
@@ -550,6 +528,28 @@ pub enum Event {
         passed: bool,
         reason: Option<String>,
     },
+    #[serde(rename = "Event.PortfolioSync")]
+    PortfolioSync { positions: usize, balances: usize },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PortfolioPositionsPayload {
+    pub positions: Vec<PositionSnapshot>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PortfolioBalancesPayload {
+    pub balances: Vec<BalanceSnapshot>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExecutionOpenOrdersPayload {
+    pub orders: Vec<OpenOrderSnapshot>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExecutionFillsResultPayload {
+    pub fills: Vec<FillReport>,
 }
 
 #[cfg(test)]
@@ -573,6 +573,10 @@ mod tests {
             Some(RequestKind::Engine(EngineCommand::Pause))
         );
         assert_eq!(
+            RequestKind::from_kind("Engine.SetMode"),
+            Some(RequestKind::Engine(EngineCommand::SetMode))
+        );
+        assert_eq!(
             RequestKind::from_kind("Strategy.PromoteCandidate"),
             Some(RequestKind::Strategy(StrategyCommand::PromoteCandidate))
         );
@@ -581,20 +585,12 @@ mod tests {
             Some(RequestKind::Risk(RiskCommand::Override))
         );
         assert_eq!(
-            RequestKind::from_kind("Venue.List"),
-            Some(RequestKind::Venue(VenueCommand::List))
+            RequestKind::from_kind("Execution.Place"),
+            Some(RequestKind::Execution(ExecutionCommand::Place))
         );
         assert_eq!(
-            RequestKind::from_kind("Portfolio.Balances"),
-            Some(RequestKind::Portfolio(PortfolioCommand::Balances))
-        );
-        assert_eq!(
-            RequestKind::from_kind("Order.Submit"),
-            Some(RequestKind::Order(OrderCommand::Submit))
-        );
-        assert_eq!(
-            RequestKind::from_kind("ExecutionMode.Get"),
-            Some(RequestKind::ExecutionMode(ExecutionModeCommand::Get))
+            RequestKind::from_kind("Portfolio.Exposure"),
+            Some(RequestKind::Portfolio(PortfolioCommand::Exposure))
         );
         assert_eq!(RequestKind::from_kind("Unknown.Command"), None);
     }
@@ -602,7 +598,7 @@ mod tests {
     #[test]
     fn response_keeps_correlation_id() {
         let req = Envelope::new("Engine.Status", json!({}));
-        let resp = Envelope::response_to(&req, json!({"ok": true}));
+        let resp = Envelope::response_to(&req, json!({ "ok": true }));
 
         assert_eq!(resp.id, req.id);
         assert_eq!(resp.kind, "Engine.Status.Response");

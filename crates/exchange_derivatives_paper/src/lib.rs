@@ -1,20 +1,22 @@
-//! Paper-only derivatives adapter used for compliant rollout fallback.
+//! Paper-only derivatives adapter used by the legacy workspace members.
 
 use std::collections::HashMap;
 
-use async_trait::async_trait;
-use exchange_core::{ExchangeAdapter, ExchangeError};
-use tokio::sync::RwLock;
-use trading_domain::{
-    AssetClass, BalanceSnapshot, ExecutionMode, InstrumentId, MarketType, OrderAck, OrderRequest,
-    OrderSide, OrderStatus, OrderSummary, PositionSnapshot, VenueCapability, VenueHealth,
+use exchange_core::{
+    AssetClass, BalanceSnapshot, ExchangeAdapter, ExchangeError, ExchangeHealth,
+    ExchangeResultFuture, ExchangeValueFuture, FillReport, InstrumentRef, InstrumentType,
+    NormalizedOrderRequest, OpenOrderSnapshot, OrderAck, OrderSide, OrderSnapshot, OrderStatus,
+    PositionSnapshot,
 };
+use tokio::sync::RwLock;
+use trading_domain::ExecutionMode;
 use uuid::Uuid;
 
 #[derive(Debug, Default)]
 struct AdapterState {
     positions: HashMap<String, PositionSnapshot>,
-    orders: HashMap<String, OrderSummary>,
+    orders: HashMap<String, OrderSnapshot>,
+    fills: Vec<FillReport>,
 }
 
 #[derive(Debug)]
@@ -31,190 +33,251 @@ impl Default for DerivativesPaperAdapter {
 
 impl DerivativesPaperAdapter {
     pub fn new(mode: ExecutionMode) -> Self {
-        // This venue is intentionally paper-only even when runtime state is tampered.
+        // This venue is intentionally paper-only.
         let mode = match mode {
             ExecutionMode::Paper => ExecutionMode::Paper,
             ExecutionMode::Live => ExecutionMode::Paper,
         };
+
         Self {
             mode,
             state: RwLock::new(AdapterState::default()),
         }
     }
 
-    fn validate_order(req: &OrderRequest) -> Result<(), ExchangeError> {
+    pub fn execution_mode(&self) -> ExecutionMode {
+        self.mode
+    }
+
+    fn now_ms() -> i64 {
+        chrono::Utc::now().timestamp_millis()
+    }
+
+    fn validate_order(req: &NormalizedOrderRequest) -> Result<(), ExchangeError> {
         if !matches!(
-            req.instrument.market_type,
-            MarketType::Perpetual | MarketType::Futures | MarketType::Option
+            req.instrument.instrument_type,
+            InstrumentType::Perpetual | InstrumentType::Future | InstrumentType::Option
         ) {
-            return Err(ExchangeError {
-                code: "unsupported_market_type".to_string(),
-                message: "paper derivatives adapter only accepts derivative market types"
-                    .to_string(),
-                retriable: false,
-            });
+            return Err(ExchangeError::new(
+                "unsupported_instrument",
+                "paper derivatives adapter only accepts perp/future/option instruments",
+                false,
+            ));
         }
-        if req.quantity <= 0.0 {
-            return Err(ExchangeError {
-                code: "invalid_quantity".to_string(),
-                message: "order quantity must be > 0".to_string(),
-                retriable: false,
-            });
+
+        if req.qty <= 0.0 {
+            return Err(ExchangeError::new(
+                "invalid_quantity",
+                "order qty must be > 0",
+                false,
+            ));
         }
+
         Ok(())
+    }
+
+    fn signed_qty(side: &OrderSide, qty: f64) -> f64 {
+        match side {
+            OrderSide::Buy => qty,
+            OrderSide::Sell => -qty,
+        }
+    }
+
+    fn fill_price(req: &NormalizedOrderRequest) -> f64 {
+        req.limit_price.unwrap_or(1.0)
     }
 }
 
-#[async_trait]
 impl ExchangeAdapter for DerivativesPaperAdapter {
     fn venue(&self) -> &'static str {
         "derivatives_paper"
     }
 
-    fn capabilities(&self) -> Vec<VenueCapability> {
-        vec![
-            VenueCapability {
-                market_type: MarketType::Perpetual,
-                supports_live: false,
-                supports_paper: true,
-                supports_post_only: true,
-                supports_reduce_only: true,
-            },
-            VenueCapability {
-                market_type: MarketType::Futures,
-                supports_live: false,
-                supports_paper: true,
-                supports_post_only: true,
-                supports_reduce_only: true,
-            },
-            VenueCapability {
-                market_type: MarketType::Option,
-                supports_live: false,
-                supports_paper: true,
-                supports_post_only: true,
-                supports_reduce_only: true,
-            },
-        ]
+    fn connect_market_data(&self) -> ExchangeResultFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
     }
 
-    fn execution_mode(&self) -> ExecutionMode {
-        self.mode
-    }
+    fn place_order(&self, req: NormalizedOrderRequest) -> ExchangeResultFuture<'_, OrderAck> {
+        Box::pin(async move {
+            Self::validate_order(&req)?;
 
-    async fn connect_market_data(&self) -> Result<(), ExchangeError> {
-        Ok(())
-    }
+            let now = Self::now_ms();
+            let venue_order_id = format!("deriv-paper-{}", Uuid::new_v4());
+            let fill_price = Self::fill_price(&req);
 
-    async fn place_order(&self, req: OrderRequest) -> Result<OrderAck, ExchangeError> {
-        Self::validate_order(&req)?;
-
-        let now = chrono::Utc::now().timestamp_millis();
-        let venue_order_id = format!("deriv-paper-{}", Uuid::new_v4());
-
-        let summary = OrderSummary {
-            venue_order_id: venue_order_id.clone(),
-            client_order_id: req.client_order_id.clone(),
-            strategy_id: req.strategy_id.clone(),
-            venue_id: req.venue_id.clone(),
-            instrument: req.instrument.clone(),
-            side: req.side,
-            order_type: req.order_type,
-            quantity: req.quantity,
-            filled_quantity: req.quantity,
-            avg_fill_price: req.limit_price,
-            status: OrderStatus::Filled,
-            created_at_ms: now,
-            updated_at_ms: now,
-            message: Some("paper fill".to_string()),
-        };
-
-        let mut state = self.state.write().await;
-        let key = req.instrument.key();
-        let signed = match req.side {
-            OrderSide::Buy => req.quantity,
-            OrderSide::Sell => -req.quantity,
-        };
-        let entry = state
-            .positions
-            .entry(key)
-            .or_insert_with(|| PositionSnapshot {
-                venue_id: req.venue_id.clone(),
+            let snapshot = OrderSnapshot {
+                venue: req.venue.clone(),
+                venue_order_id: venue_order_id.clone(),
+                client_order_id: req.client_order_id.clone(),
+                strategy_id: req.strategy_id.clone(),
                 instrument: req.instrument.clone(),
-                quantity: 0.0,
-                avg_price: req.limit_price.unwrap_or(0.0),
-                mark_price: req.limit_price,
-                unrealized_pnl: Some(0.0),
-            });
-        entry.quantity += signed;
-        if let Some(price) = req.limit_price {
-            entry.avg_price = price;
-            entry.mark_price = Some(price);
-        }
+                side: req.side.clone(),
+                order_type: req.order_type.clone(),
+                status: OrderStatus::Filled,
+                qty: req.qty,
+                filled_qty: req.qty,
+                limit_price: req.limit_price,
+                avg_fill_price: Some(fill_price),
+                created_at_ms: now,
+                updated_at_ms: now,
+                simulated: true,
+            };
 
-        state.orders.insert(venue_order_id.clone(), summary);
+            let fill = FillReport {
+                venue: req.venue.clone(),
+                venue_fill_id: format!("deriv-fill-{}", Uuid::new_v4()),
+                venue_order_id: venue_order_id.clone(),
+                client_order_id: req.client_order_id.clone(),
+                strategy_id: req.strategy_id.clone(),
+                instrument: req.instrument.clone(),
+                side: req.side.clone(),
+                qty: req.qty,
+                price: fill_price,
+                fee: 0.0,
+                fee_asset: req.instrument.quote.clone(),
+                liquidity: Some("maker".to_string()),
+                simulated: true,
+                ts_ms: now,
+            };
 
-        Ok(OrderAck {
-            venue_order_id,
-            accepted: true,
-            status: OrderStatus::Filled,
-            reason: None,
+            let mut state = self.state.write().await;
+            let key = format!("{}:{}", req.instrument.venue, req.instrument.venue_symbol);
+            let entry = state
+                .positions
+                .entry(key)
+                .or_insert_with(|| PositionSnapshot {
+                    venue: req.venue.clone(),
+                    instrument: req.instrument.clone(),
+                    qty: 0.0,
+                    avg_price: fill_price,
+                    mark_price: Some(fill_price),
+                    unrealized_pnl: Some(0.0),
+                });
+            entry.qty += Self::signed_qty(&req.side, req.qty);
+            entry.avg_price = fill_price;
+            entry.mark_price = Some(fill_price);
+
+            state.orders.insert(venue_order_id.clone(), snapshot);
+            state.fills.push(fill);
+
+            Ok(OrderAck {
+                venue_order_id,
+                client_order_id: req.client_order_id,
+                accepted: true,
+                status: OrderStatus::Filled,
+                filled_qty: req.qty,
+                avg_fill_price: Some(fill_price),
+                simulated: true,
+                reason: None,
+                ts_ms: now,
+            })
         })
     }
 
-    async fn cancel_order(&self, venue_order_id: &str) -> Result<(), ExchangeError> {
-        let mut state = self.state.write().await;
-        let Some(order) = state.orders.get_mut(venue_order_id) else {
-            return Err(ExchangeError {
-                code: "order_not_found".to_string(),
-                message: format!("unknown order id: {venue_order_id}"),
-                retriable: false,
-            });
-        };
-        order.status = OrderStatus::Canceled;
-        order.updated_at_ms = chrono::Utc::now().timestamp_millis();
-        Ok(())
+    fn cancel_order(&self, venue_order_id: &str) -> ExchangeResultFuture<'_, ()> {
+        let venue_order_id = venue_order_id.to_string();
+        Box::pin(async move {
+            let mut state = self.state.write().await;
+            let order = state.orders.get_mut(&venue_order_id).ok_or_else(|| {
+                ExchangeError::new(
+                    "order_not_found",
+                    format!("unknown order id: {venue_order_id}"),
+                    false,
+                )
+            })?;
+            order.status = OrderStatus::Canceled;
+            order.updated_at_ms = Self::now_ms();
+            Ok(())
+        })
     }
 
-    async fn sync_positions(&self) -> Result<Vec<PositionSnapshot>, ExchangeError> {
-        let state = self.state.read().await;
-        Ok(state.positions.values().cloned().collect())
+    fn get_order(&self, venue_order_id: &str) -> ExchangeResultFuture<'_, Option<OrderSnapshot>> {
+        let venue_order_id = venue_order_id.to_string();
+        Box::pin(async move { Ok(self.state.read().await.orders.get(&venue_order_id).cloned()) })
     }
 
-    async fn sync_balances(&self) -> Result<Vec<BalanceSnapshot>, ExchangeError> {
-        Ok(vec![BalanceSnapshot {
-            venue_id: "derivatives_paper".to_string(),
-            asset: "USD".to_string(),
-            total: 20_000.0,
-            available: 20_000.0,
-        }])
+    fn open_orders(&self) -> ExchangeResultFuture<'_, Vec<OpenOrderSnapshot>> {
+        Box::pin(async move {
+            let state = self.state.read().await;
+            Ok(state
+                .orders
+                .values()
+                .filter(|order| matches!(order.status, OrderStatus::New | OrderStatus::PartiallyFilled))
+                .cloned()
+                .map(|order| OpenOrderSnapshot { order })
+                .collect())
+        })
     }
 
-    async fn list_orders(&self) -> Result<Vec<OrderSummary>, ExchangeError> {
-        let state = self.state.read().await;
-        Ok(state.orders.values().cloned().collect())
+    fn fills_since(
+        &self,
+        since_ts_ms: i64,
+        limit: usize,
+    ) -> ExchangeResultFuture<'_, Vec<FillReport>> {
+        Box::pin(async move {
+            let state = self.state.read().await;
+            let mut fills: Vec<FillReport> = state
+                .fills
+                .iter()
+                .filter(|fill| fill.ts_ms >= since_ts_ms)
+                .cloned()
+                .collect();
+            fills.sort_by_key(|fill| fill.ts_ms);
+            if fills.len() > limit {
+                fills = fills[fills.len().saturating_sub(limit)..].to_vec();
+            }
+            Ok(fills)
+        })
     }
 
-    fn health(&self) -> VenueHealth {
-        VenueHealth {
-            venue_id: "derivatives_paper".to_string(),
-            healthy: true,
-            connected_market_data: true,
-            connected_trading: true,
-            message: Some("paper-only derivatives venue".to_string()),
-        }
+    fn sync_positions(&self) -> ExchangeResultFuture<'_, Vec<PositionSnapshot>> {
+        Box::pin(async move {
+            let state = self.state.read().await;
+            Ok(state.positions.values().cloned().collect())
+        })
+    }
+
+    fn sync_balances(&self) -> ExchangeResultFuture<'_, Vec<BalanceSnapshot>> {
+        Box::pin(async {
+            Ok(vec![BalanceSnapshot {
+                venue: "derivatives_paper".to_string(),
+                asset: "USD".to_string(),
+                total: 20_000.0,
+                available: 20_000.0,
+            }])
+        })
+    }
+
+    fn health(&self) -> ExchangeValueFuture<'_, ExchangeHealth> {
+        Box::pin(async {
+            ExchangeHealth {
+                venue: "derivatives_paper".to_string(),
+                healthy: true,
+                connected_market_data: true,
+                connected_trading: true,
+                message: Some("paper-only derivatives venue".to_string()),
+            }
+        })
     }
 }
 
-pub fn default_perp_instrument(symbol: &str) -> InstrumentId {
-    InstrumentId {
-        venue_id: "derivatives_paper".to_string(),
-        symbol: symbol.to_string(),
-        asset_class: AssetClass::Derivative,
-        market_type: MarketType::Perpetual,
+pub fn default_perp_instrument(symbol: &str) -> InstrumentRef {
+    let (base, quote) = symbol
+        .split_once('-')
+        .map(|(b, q)| (Some(b.to_string()), Some(q.to_string())))
+        .unwrap_or_else(|| (Some(symbol.to_string()), Some("USD".to_string())));
+
+    InstrumentRef {
+        venue: "derivatives_paper".to_string(),
+        venue_symbol: symbol.to_string(),
+        asset_class: AssetClass::Crypto,
+        instrument_type: InstrumentType::Perpetual,
+        base,
+        quote,
         expiry_ts_ms: None,
         strike: None,
-        option_type: None,
-        metadata: Default::default(),
+        option_right: None,
+        contract_multiplier: Some(1.0),
     }
 }
 

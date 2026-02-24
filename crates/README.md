@@ -7,17 +7,19 @@ Low-latency bridge between OpenClaw tools and a Rust trading daemon over a Unix 
 | Path | Purpose |
 | --- | --- |
 | `trading_protocol` | Shared frame codec + envelope schema (`type`, `id`, `payload`) |
-| `trading_daemon` | UDS server (`/var/run/openclaw/trading.sock`) handling engine/strategy/risk commands |
+| `trading_daemon` | UDS server (`/var/run/openclaw/trading.sock`) handling engine/strategy/risk/execution/portfolio commands |
 | `tradingctl` | CLI client for daemon control/status/capabilities checks |
 | `exchange_core` | Venue abstraction traits and normalized order/account types |
 | `strategy_core` | Regime-aware strategy interface + signal intent schema |
 | `risk_core` | Non-bypassable hard safety-cage policy and evaluators |
+| `coinbase_at_adapter` | Coinbase Advanced Trade spot execution adapter (live route) |
+| `paper_exchange_adapter` | Deterministic simulated execution adapter (paper route) |
 | `../.openclaw/extensions/trading-bridge` | OpenClaw extension exposing tools to Clawdbot |
 
 ## How It Works
 
 1. OpenClaw tool calls (`trading_hft`) are sent by the extension over UDS.
-2. `trading_daemon` decodes framed JSON envelopes and processes control commands.
+2. `trading_daemon` decodes framed JSON envelopes and processes control, risk, strategy, execution, and portfolio commands.
 3. Responses are correlated by envelope `id` and returned to the tool caller.
 
 Protocol details:
@@ -91,7 +93,7 @@ cargo run -p tradingctl -- --socket /tmp/openclaw/trading.sock capabilities
 
 The extension registers one unified control-plane tool:
 
-- `trading_hft`: a single action-based interface for `health`, engine controls, risk controls, and strategy lifecycle operations.
+- `trading_hft`: a single action-based interface for `health`, engine controls, risk controls, strategy lifecycle operations, execution actions, and portfolio reads.
 
 Extension path:
 
@@ -104,18 +106,23 @@ Socket path configuration:
 
 Daemon state configuration:
 
-- `TRADING_STATE_PATH`: strategy snapshot path (default `/var/run/openclaw/trading-state.json`)
+- `TRADING_DATA_DIR`: journal/state root (default `/var/lib/openclaw/trading`)
+- `TRADING_STATE_PATH`: state snapshot path (default `${TRADING_DATA_DIR}/state/engine-state.json`)
 - `TRADING_CANDIDATE_TTL_MS`: optional candidate expiration TTL in milliseconds (default `0`, disabled)
+- `TRADING_ENGINE_MODE`: startup mode (`paper`, `hitl_live`, `auto_live`; default `auto_live`)
 
 Command behavior notes:
 
 - `Control.Status` is still accepted for compatibility, but clients should prefer `Engine.Status`.
 - `Control.Capabilities` reports daemon protocol/schema compatibility (`protocol_version`, `status_schema_version`, supported command kinds, daemon build metadata).
-- `Engine.Status` and `Control.Status` now share the same rich status payload shape and include `status_schema_version`.
+- `Engine.Status` and `Control.Status` now share the same rich status payload shape and include mode, scoped kill switches, execution counters, and portfolio summary.
 - Plugin/config changes require a gateway restart to take effect (`./trading-cli clawdbot-trading up` or container restart).
 - `Control.Stop` now means halted but not paused (`running=false`, `paused=false`).
 - `Engine.Pause` means safety pause (`running=false`, `paused=true`).
 - `reset_kill_switch` keeps the engine paused until explicit `resume`.
+- `Execution.Place` routes live Coinbase spot only when in non-paper mode and credentials are present; otherwise routes to paper adapter.
+- `Portfolio.Positions`, `Portfolio.Balances`, and `Portfolio.Exposure` expose reconciled multi-asset snapshots.
+- Scoped risk overrides are supported via `Risk.Override` actions: `kill_global`, `reset_global`, `kill_venue`, `reset_venue`, `kill_strategy`, `reset_strategy`.
 
 ## Troubleshooting
 

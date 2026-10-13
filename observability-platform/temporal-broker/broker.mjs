@@ -221,9 +221,11 @@ function upsertWorkflow(payload = {}) {
   const createdAt = existing?.created_at ?? nowIso();
   const normalizedStatus = payload.status
     ? normalizeStatus(payload.status)
-    : payload.requires_approval
+    : existing
+      ? normalizeStatus(existing.status ?? "running")
+      : payload.requires_approval
       ? "awaiting_approval"
-      : normalizeStatus(existing?.status ?? "running");
+      : "running";
 
   const merged = {
     workflow_id: workflowId,

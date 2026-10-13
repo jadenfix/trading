@@ -1159,6 +1159,12 @@ async function handleRequest(req, res) {
   const requestUrl = new URL(req.url ?? "/", `http://${req.headers.host || `${host}:${port}`}`);
   const pathname = requestUrl.pathname;
 
+  if (req.method === "GET" && pathname === "/favicon.ico") {
+    res.writeHead(204, { "cache-control": "public, max-age=86400" });
+    res.end();
+    return;
+  }
+
   if (await serveStatic(pathname, res)) {
     return;
   }
@@ -1475,14 +1481,31 @@ async function handleRequest(req, res) {
     const approveMatch = pathname.match(/^\/api\/traces\/([^/]+)\/approve$/);
     if (req.method === "POST" && approveMatch) {
       const traceId = decodeURIComponent(approveMatch[1]);
-      const body = await readBodyJson(req).catch(() => ({}));
+      let body;
+      try {
+        body = await readBodyJson(req);
+      } catch (error) {
+        if (error && typeof error === "object" && Number.isInteger(error.statusCode)) {
+          return sendGoogleError(
+            res,
+            error.statusCode,
+            error.googleStatus ?? "INVALID_ARGUMENT",
+            error.message ?? "Invalid JSON payload",
+          );
+        }
+        return sendGoogleError(res, 400, "INVALID_ARGUMENT", "Invalid JSON payload");
+      }
+      const actor = requireControlAuth(req, res, body.approved_by ?? "operator");
+      if (!actor) {
+        return;
+      }
       const response = await fetchBroker(`/execution/${encodeURIComponent(traceId)}/approve`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          approved_by: body.approved_by ?? "operator",
+          approved_by: actor,
           command_context: body.command_context ?? "trace-api-legacy",
         }),
       });

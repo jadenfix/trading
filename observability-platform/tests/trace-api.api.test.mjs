@@ -79,6 +79,48 @@ test("trace-api enforces auth, proxies control actions, and redacts config token
     assert.equal(config.payload?.control_token_required, true);
     assert.equal(config.payload?.control_token_default, null);
 
+    const legacyWorkflowId = "wf-trace-api-legacy-1";
+    const registerLegacy = await jsonRequest(brokerBaseUrl, "POST", "/workflows/register", {
+      workflow_id: legacyWorkflowId,
+      trace_id: legacyWorkflowId,
+      source_bot: "sports-agent",
+      mode: "hitl",
+      status: "awaiting_approval",
+      requires_approval: true,
+    });
+    assert.equal(registerLegacy.status, 200);
+
+    const unauthLegacyApprove = await jsonRequest(
+      traceApiBaseUrl,
+      "POST",
+      `/api/traces/${legacyWorkflowId}/approve`,
+      { approved_by: "csrf-attempt" },
+    );
+    assert.equal(unauthLegacyApprove.status, 401);
+    assert.equal(unauthLegacyApprove.payload?.error?.status, "UNAUTHENTICATED");
+    const afterUnauthLegacy = await jsonRequest(
+      brokerBaseUrl,
+      "GET",
+      `${parentPath}/workflows/${legacyWorkflowId}`,
+    );
+    assert.equal(afterUnauthLegacy.payload?.status, "awaiting_approval");
+
+    const authLegacyApprove = await jsonRequest(
+      traceApiBaseUrl,
+      "POST",
+      `/api/traces/${legacyWorkflowId}/approve`,
+      { approved_by: "legacy-test" },
+      { authorization: `Bearer ${controlToken}` },
+    );
+    assert.equal(authLegacyApprove.status, 200);
+    const afterAuthLegacy = await jsonRequest(
+      brokerBaseUrl,
+      "GET",
+      `${parentPath}/workflows/${legacyWorkflowId}`,
+    );
+    assert.equal(afterAuthLegacy.payload?.status, "approved");
+    assert.equal(afterAuthLegacy.payload?.approval?.approved_by, "legacy-test");
+
     const unauth = await jsonRequest(traceApiBaseUrl, "POST", `${parentPath}/workflows/${workflowId}:execute`, {
       actor: "test",
       reason: "unauthorized execute",

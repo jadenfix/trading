@@ -91,3 +91,37 @@ jobs:
 
       - name: Run observability API/integration tests
         run: bash ./trading-cli test observability
+
+  observability-browser-tests:
+    name: observability browser E2E
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install browser harness
+        run: npm ci --no-fund --no-audit
+        working-directory: observability-platform/browser-tests
+
+      - name: Install Chromium
+        run: npx playwright-core install --with-deps chromium
+        working-directory: observability-platform/browser-tests
+
+      - name: Run real dashboard E2E
+        run: npm test
+        working-directory: observability-platform/browser-tests
+
+      - name: Install media verifier dependency
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Verify source-pinned demo media
+        run: node observability-platform/scripts/verify-demo-media.mjs
+
+      - name: Browser tests leave a clean checkout
+        run: test -z "$(git status --short)"

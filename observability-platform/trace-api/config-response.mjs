@@ -8,5 +8,6 @@ export function buildApiConfigResponse(options) {
     default_location: options.defaultLocation,
     control_token_required: true,
     control_token_default: null,
+    demo_mode: options.demoMode === true,
   };
 }

@@ -28,7 +28,9 @@ const controlToken = process.env.OBS_CONTROL_TOKEN ?? "local-dev-token";
 const controlAuditFile = process.env.OBS_CONTROL_AUDIT_FILE
   ? path.resolve(process.env.OBS_CONTROL_AUDIT_FILE)
   : path.join(repoRoot, ".trading-cli", "observability", "control-audit.jsonl");
-const devStateDir = path.join(repoRoot, ".trading-cli", "dev");
+const devStateDir = process.env.TRACE_API_DEV_STATE_DIR
+  ? path.resolve(process.env.TRACE_API_DEV_STATE_DIR)
+  : path.join(repoRoot, ".trading-cli", "dev");
 const maxBodyBytes = Math.max(1024, Number.parseInt(process.env.TRACE_API_MAX_BODY_BYTES ?? "1048576", 10) || 1048576);
 const localOpsMaxEntries = Math.max(
   100,
@@ -1183,6 +1185,7 @@ async function handleRequest(req, res) {
           traceApiUrl: `http://${host}:${port}`,
           defaultProject,
           defaultLocation,
+          demoMode: process.env.OBS_PAPER_DEMO === "1",
         }),
       );
     }

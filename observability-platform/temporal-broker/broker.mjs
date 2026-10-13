@@ -219,13 +219,17 @@ function upsertWorkflow(payload = {}) {
 
   const existing = getWorkflow(workflowId);
   const createdAt = existing?.created_at ?? nowIso();
-  const normalizedStatus = payload.status
-    ? normalizeStatus(payload.status)
-    : existing
-      ? normalizeStatus(existing.status ?? "running")
+  // Registration is idempotent metadata publication, not a lifecycle transition.
+  // Workers re-register their original payload while polling, so allowing a repeated
+  // `awaiting_approval` value to overwrite an approved/canceled/terminal workflow
+  // would reopen controls and permit duplicate execution.
+  const normalizedStatus = existing
+    ? normalizeStatus(existing.status ?? "running")
+    : payload.status
+      ? normalizeStatus(payload.status)
       : payload.requires_approval
-      ? "awaiting_approval"
-      : "running";
+        ? "awaiting_approval"
+        : "running";
 
   const merged = {
     workflow_id: workflowId,
@@ -234,17 +238,17 @@ function upsertWorkflow(payload = {}) {
     source_bot: String(payload.source_bot ?? existing?.source_bot ?? "unknown"),
     requires_approval: Boolean(payload.requires_approval ?? existing?.requires_approval ?? false),
     status: normalizedStatus,
-    cancel_state: String(payload.cancel_state ?? existing?.cancel_state ?? "none"),
-    control_locked: Boolean(payload.control_locked ?? existing?.control_locked ?? false),
+    cancel_state: String(existing?.cancel_state ?? payload.cancel_state ?? "none"),
+    control_locked: Boolean(existing?.control_locked ?? payload.control_locked ?? false),
     created_at: createdAt,
     updated_at: nowIso(),
     recommendation: payload.recommendation ?? existing?.recommendation ?? null,
     result: payload.result ?? existing?.result ?? null,
-    approval: payload.approval ?? existing?.approval ?? null,
+    approval: existing?.approval ?? payload.approval ?? null,
     events: Array.isArray(existing?.events) ? existing.events : [],
     input: payload.input ?? existing?.input ?? null,
-    last_command_at: payload.last_command_at ?? existing?.last_command_at ?? null,
-    last_command_by: payload.last_command_by ?? existing?.last_command_by ?? null,
+    last_command_at: existing?.last_command_at ?? payload.last_command_at ?? null,
+    last_command_by: existing?.last_command_by ?? payload.last_command_by ?? null,
   };
 
   state.workflows[workflowId] = merged;

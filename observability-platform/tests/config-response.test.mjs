@@ -14,4 +14,5 @@ test("buildApiConfigResponse never exposes a control token", () => {
 
   assert.equal(config.control_token_required, true);
   assert.equal(config.control_token_default, null);
+  assert.equal(config.demo_mode, false);
 });

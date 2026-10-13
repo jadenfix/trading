@@ -1,0 +1,1 @@
+{"private":true,"type":"module","scripts":{"test":"node e2e.mjs"},"devDependencies":{"playwright-core":"1.62.1"}}

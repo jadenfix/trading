@@ -1,0 +1,48 @@
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { startPaperDemo } from '../paper-demo.mjs';
+const require = createRequire(import.meta.url);
+const { chromium } = require(process.env.PLAYWRIGHT_PACKAGE || 'playwright-core');
+const demo = await startPaperDemo();
+let browser;
+try {
+  browser = await chromium.launch({ executablePath: process.env.BROWSER_EXECUTABLE || undefined, headless: true, args: ['--no-sandbox'] });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  const errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  page.on('dialog', dialog => dialog.accept());
+  await page.goto(demo.dashboardUrl);
+  await page.locator('#trace-list [data-workflow-id="paper-review"]').waitFor();
+  assert.match(await page.locator('.eyebrow').innerText(), /synthetic fixtures/i);
+  await page.locator('#control-token-input').fill(demo.controlToken);
+  await page.locator('#control-token-input').dispatchEvent('change');
+  await page.locator('#trace-list [data-workflow-id="paper-review"]').click();
+  await page.waitForFunction(() => !document.querySelector('#execute-btn').disabled);
+  await page.locator('#execute-btn').click();
+  await page.waitForFunction(() => document.querySelector('#trace-meta').textContent.includes('APPROVED'));
+  const parent = '/v1/projects/paper-demo/locations/local';
+  let state = await (await fetch(demo.dashboardUrl + parent + '/workflows/paper-review')).json();
+  assert.equal(state.state, 'APPROVED');
+  await page.locator('#trace-list [data-workflow-id="paper-cancel"]').click();
+  await page.waitForFunction(() => document.querySelector('#trace-title').textContent === 'paper-cancel');
+  await page.waitForFunction(() => !document.querySelector('#cancel-btn').disabled);
+  const cancelResponse = page.waitForResponse(r => r.url().includes('paper-cancel:cancel'));
+  await page.locator('#cancel-btn').click();
+  const canceled = await cancelResponse;
+  assert.equal(canceled.status(), 200);
+  const cancellation = await canceled.json();
+  assert.equal(cancellation.response.outcome, 'soft_cancel_requested');
+  state = await (await fetch(demo.dashboardUrl + parent + '/workflows/paper-cancel')).json();
+  assert.equal(state.cancelState, 'soft_requested');
+  assert.equal(state.state, 'AWAITING_APPROVAL');
+  await page.waitForFunction(() => document.querySelector('#trace-meta').textContent.includes('soft_requested'));
+  await page.reload();
+  await page.locator('#trace-list [data-workflow-id="paper-review"]').click();
+  await page.waitForFunction(() => document.querySelector('#trace-meta').textContent.includes('APPROVED'));
+  assert.deepEqual(errors, []);
+  if (process.env.BROWSER_EVIDENCE_PATH) await page.screenshot({ path: process.env.BROWSER_EVIDENCE_PATH, fullPage: true });
+  console.log('Browser E2E passed: real dashboard, token authorization, approval/cancel-request, backend state, persisted refresh; no page errors. Synthetic paper fixtures only; no worker consumes the cancellation.');
+} finally {
+  await browser?.close();
+  await demo.stop();
+}

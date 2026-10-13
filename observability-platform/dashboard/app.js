@@ -75,13 +75,13 @@ function normalizeState(value) {
 function stateChip(workflowState) {
   const normalized = normalizeState(workflowState);
   const className = `status-chip status-${normalized.toLowerCase()}`;
-  return `<span class="${className}">${escapeHtml(normalized)}</span>`;
+  return `<span class="${escapeHtml(className)}">${escapeHtml(normalized)}</span>`;
 }
 
 function runtimeChip(runtimeState) {
   const normalized = String(runtimeState || "UNKNOWN").toUpperCase();
   const className = `runtime-chip runtime-${normalized.toLowerCase()}`;
-  return `<span class="${className}">${escapeHtml(normalized)}</span>`;
+  return `<span class="${escapeHtml(className)}">${escapeHtml(normalized)}</span>`;
 }
 
 function parentPath() {
@@ -174,6 +174,12 @@ async function loadConfig() {
   const response = await fetch("/api/config", { cache: "no-store" });
   const payload = await response.json();
   state.config = payload;
+
+  if (payload.demo_mode) {
+    document.querySelector(".eyebrow").textContent = "Paper demo · synthetic fixtures · no live orders";
+    document.querySelector(".executed-panel h2").textContent = "Paper Fills (Fixtures)";
+    temporalLinkEl.hidden = true;
+  }
 
   if (payload.temporal_ui_url) {
     temporalLinkEl.href = payload.temporal_ui_url;

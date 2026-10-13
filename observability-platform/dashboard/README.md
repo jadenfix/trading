@@ -13,6 +13,22 @@ Browser UI for unified workflow traces and control actions.
 
 ## Run
 
+For an isolated, credential-free walkthrough of the real UI and control APIs:
+
+```bash
+node observability-platform/paper-demo.mjs
+```
+
+Open the printed dashboard URL and paste the printed local capability into
+`Control Token`. Inspect the synthetic `PAPER-SF-TEMP` fill, approve
+`paper-review`, and cancel `paper-cancel`. All fixtures use paper mode; the
+launcher starts only the local broker and trace API, with fresh temporary
+state, audit files, and PID lookup directory. It starts no exchange connector,
+model, worker, or Temporal server. Approval changes broker state and does not
+place an order. Ctrl+C stops both processes and removes the demo data. This is
+a fixture demonstration of the observability/control layer, not proof of live
+trading or strategy performance.
+
 From repo root:
 
 ```bash

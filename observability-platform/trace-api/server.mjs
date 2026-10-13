@@ -1499,15 +1499,29 @@ async function handleRequest(req, res) {
       if (!actor) {
         return;
       }
-      const response = await fetchBroker(`/execution/${encodeURIComponent(traceId)}/approve`, {
+      const requestId = String(body.requestId ?? body.request_id ?? `${Date.now()}-${Math.random()}`);
+      const reason = String(body.reason ?? "").trim();
+      const brokerPath = `/v1/projects/${encodeURIComponent(defaultProject)}/locations/${encodeURIComponent(defaultLocation)}/workflows/${encodeURIComponent(traceId)}:execute`;
+      const response = await fetchBroker(brokerPath, {
         method: "POST",
         headers: {
           "content-type": "application/json",
+          "x-observability-actor": actor,
         },
         body: JSON.stringify({
-          approved_by: actor,
-          command_context: body.command_context ?? "trace-api-legacy",
+          requestId,
+          actor,
+          reason,
         }),
+      });
+      await appendControlAudit({
+        actor,
+        action: "execute",
+        target: workflowResourceName(defaultProject, defaultLocation, traceId),
+        request_id: requestId,
+        reason: reason || null,
+        upstream_status: response.status,
+        deprecated_route: true,
       });
       return sendJson(
         res,

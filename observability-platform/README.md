@@ -2,6 +2,14 @@
 
 Unified observability + workflow control stack for this repository.
 
+## Verified Synthetic-Paper Workflow
+
+![Paper control-plane demo](./docs/demo/paper-control-plane.gif)
+
+[MP4](./docs/demo/paper-control-plane.mp4) · [capture receipt](./docs/demo/capture.json)
+
+The demo exercises the actual local broker, trace API, dashboard, token authorization, approval, soft-cancel request, and persisted reload. Fixtures are synthetic; there is no live order, exchange, worker completion, model/provider call, or performance claim.
+
 ## What This Adds
 
 - End-to-end trace visibility across:

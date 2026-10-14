@@ -257,6 +257,9 @@ test_observability() {
       tests/http-json.test.mjs \
       tests/local-ops-cache.test.mjs \
       tests/config-response.test.mjs \
+      tests/dashboard-render.test.mjs \
+      tests/paper-demo-startup.test.mjs \
+      tests/paper-demo.test.mjs \
       tests/temporal-broker.api.test.mjs \
       tests/trace-api.api.test.mjs
 }

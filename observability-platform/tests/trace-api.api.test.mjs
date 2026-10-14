@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   canBindLocalhost,
@@ -78,6 +78,94 @@ test("trace-api enforces auth, proxies control actions, and redacts config token
     assert.equal(config.status, 200);
     assert.equal(config.payload?.control_token_required, true);
     assert.equal(config.payload?.control_token_default, null);
+
+    const legacyWorkflowId = "wf-trace-api-legacy-1";
+    const registerLegacy = await jsonRequest(brokerBaseUrl, "POST", "/workflows/register", {
+      workflow_id: legacyWorkflowId,
+      trace_id: legacyWorkflowId,
+      source_bot: "sports-agent",
+      mode: "hitl",
+      status: "awaiting_approval",
+      requires_approval: true,
+    });
+    assert.equal(registerLegacy.status, 200);
+
+    const unauthLegacyApprove = await jsonRequest(
+      traceApiBaseUrl,
+      "POST",
+      `/api/traces/${legacyWorkflowId}/approve`,
+      { approved_by: "csrf-attempt" },
+    );
+    assert.equal(unauthLegacyApprove.status, 401);
+    assert.equal(unauthLegacyApprove.payload?.error?.status, "UNAUTHENTICATED");
+    const afterUnauthLegacy = await jsonRequest(
+      brokerBaseUrl,
+      "GET",
+      `${parentPath}/workflows/${legacyWorkflowId}`,
+    );
+    assert.equal(afterUnauthLegacy.payload?.status, "awaiting_approval");
+
+    const authLegacyApprove = await jsonRequest(
+      traceApiBaseUrl,
+      "POST",
+      `/api/traces/${legacyWorkflowId}/approve`,
+      { approved_by: "legacy-test" },
+      { authorization: `Bearer ${controlToken}` },
+    );
+    assert.equal(authLegacyApprove.status, 200);
+    const afterAuthLegacy = await jsonRequest(
+      brokerBaseUrl,
+      "GET",
+      `${parentPath}/workflows/${legacyWorkflowId}`,
+    );
+    assert.equal(afterAuthLegacy.payload?.status, "approved");
+    assert.equal(afterAuthLegacy.payload?.approval?.approved_by, "legacy-test");
+
+    const terminalWorkflowId = "wf-trace-api-terminal-1";
+    const registerTerminal = await jsonRequest(brokerBaseUrl, "POST", "/workflows/register", {
+      workflow_id: terminalWorkflowId,
+      trace_id: terminalWorkflowId,
+      source_bot: "sports-agent",
+      mode: "hitl",
+      status: "canceled_hard",
+      cancel_state: "hard_requested",
+      control_locked: true,
+      requires_approval: true,
+    });
+    assert.equal(registerTerminal.status, 200);
+
+    const terminalLegacyApprove = await jsonRequest(
+      traceApiBaseUrl,
+      "POST",
+      `/api/traces/${terminalWorkflowId}/approve`,
+      { approved_by: "legacy-test", requestId: "legacy-terminal-1" },
+      { authorization: `Bearer ${controlToken}` },
+    );
+    assert.equal(terminalLegacyApprove.status, 200);
+    assert.equal(terminalLegacyApprove.payload?.done, true);
+    assert.equal(terminalLegacyApprove.payload?.error?.status, "FAILED_PRECONDITION");
+
+    const afterTerminalLegacy = await jsonRequest(
+      brokerBaseUrl,
+      "GET",
+      `${parentPath}/workflows/${terminalWorkflowId}`,
+    );
+    assert.equal(afterTerminalLegacy.payload?.status, "canceled_hard");
+    assert.equal(afterTerminalLegacy.payload?.approval, null);
+    assert.deepEqual(afterTerminalLegacy.payload?.availableActions, []);
+
+    const controlAudit = (await readFile(controlAuditFile, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.ok(
+      controlAudit.some(
+        (entry) =>
+          entry.request_id === "legacy-terminal-1" &&
+          entry.action === "execute" &&
+          entry.deprecated_route === true,
+      ),
+    );
 
     const unauth = await jsonRequest(traceApiBaseUrl, "POST", `${parentPath}/workflows/${workflowId}:execute`, {
       actor: "test",

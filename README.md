@@ -7,6 +7,14 @@ Monorepo for four trading/automation tracks:
 - LLM workflow (`llm-workflows`)
 - unified observability + sports agent stack (`observability-platform`)
 
+## Verified Paper Control-Plane Demo
+
+![Synthetic paper observability workflow](./observability-platform/docs/demo/paper-control-plane.gif)
+
+[MP4](./observability-platform/docs/demo/paper-control-plane.mp4) · [source/media receipt](./observability-platform/docs/demo/capture.json)
+
+This recording runs the real local broker, trace API, dashboard, authenticated approval, soft-cancel request, and persisted reload against isolated synthetic fixtures. It makes no exchange, market-data, model, provider, wallet, or real-money call. No worker consumes the cancellation, and the demo makes no profitability, latency, liquidity, scale, or deployment claim.
+
 ## Workspace Map
 
 | Workspace | Purpose | Start Here |

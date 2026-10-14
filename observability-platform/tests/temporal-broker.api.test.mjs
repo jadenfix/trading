@@ -60,6 +60,42 @@ test("temporal-broker v1 lifecycle endpoints and idempotency", async (t) => {
     assert.equal(execute.payload?.done, true);
     assert.equal(execute.payload?.response?.outcome, "execution_approved");
 
+    const approved = await jsonRequest(baseUrl, "GET", `${parentPath}/workflows/${workflowId}`);
+    const approvedEvents = approved.payload?.eventCount;
+    assert.equal(approved.payload?.status, "approved");
+    assert.deepEqual(approved.payload?.availableActions, ["cancel", "hardCancel"]);
+
+    const repeatedRegistration = await jsonRequest(baseUrl, "POST", "/workflows/register", {
+      workflow_id: workflowId,
+      trace_id: workflowId,
+      source_bot: "sports-agent",
+      mode: "hitl",
+      // This is the exact lifecycle shape the real sports worker re-posts.
+      status: "awaiting_approval",
+      requires_approval: true,
+    });
+    assert.equal(repeatedRegistration.status, 200);
+
+    const afterRepeatedRegistration = await jsonRequest(
+      baseUrl,
+      "GET",
+      `${parentPath}/workflows/${workflowId}`,
+    );
+    assert.equal(afterRepeatedRegistration.payload?.status, "approved");
+    assert.equal(afterRepeatedRegistration.payload?.approval?.approved, true);
+    assert.equal(afterRepeatedRegistration.payload?.eventCount, approvedEvents);
+    assert.deepEqual(afterRepeatedRegistration.payload?.availableActions, ["cancel", "hardCancel"]);
+
+    const repeatedExecute = await jsonRequest(
+      baseUrl,
+      "POST",
+      `${parentPath}/workflows/${workflowId}:execute`,
+      { actor: "test", reason: "must not approve twice", requestId: "req-execute-2" },
+    );
+    assert.equal(repeatedExecute.status, 200);
+    assert.equal(repeatedExecute.payload?.done, true);
+    assert.equal(repeatedExecute.payload?.error?.status, "FAILED_PRECONDITION");
+
     const softCancel = await jsonRequest(baseUrl, "POST", `${parentPath}/workflows/${workflowId}:cancel`, {
       actor: "test",
       reason: "soft cancel requested",
@@ -74,6 +110,19 @@ test("temporal-broker v1 lifecycle endpoints and idempotency", async (t) => {
     assert.equal(afterSoft.payload?.status, "approved");
     assert.equal(afterSoft.payload?.cancelState, "soft_requested");
     assert.deepEqual(afterSoft.payload?.availableActions, ["hardCancel"]);
+
+    const repeatedAfterSoft = await jsonRequest(baseUrl, "POST", "/workflows/register", {
+      workflow_id: workflowId,
+      trace_id: workflowId,
+      source_bot: "sports-agent",
+      mode: "hitl",
+      status: "awaiting_approval",
+      cancel_state: "none",
+      requires_approval: true,
+    });
+    assert.equal(repeatedAfterSoft.status, 200);
+    assert.equal(repeatedAfterSoft.payload?.status, "approved");
+    assert.equal(repeatedAfterSoft.payload?.cancel_state, "soft_requested");
 
     const hardCancel = await jsonRequest(baseUrl, "POST", `${parentPath}/workflows/${workflowId}:hardCancel`, {
       actor: "test",
@@ -99,6 +148,21 @@ test("temporal-broker v1 lifecycle endpoints and idempotency", async (t) => {
     assert.equal(afterHard.payload?.status, "canceled_hard");
     assert.equal(afterHard.payload?.controlLocked, true);
     assert.deepEqual(afterHard.payload?.availableActions, []);
+
+    const repeatedAfterHard = await jsonRequest(baseUrl, "POST", "/workflows/register", {
+      workflow_id: workflowId,
+      trace_id: workflowId,
+      source_bot: "sports-agent",
+      mode: "hitl",
+      status: "awaiting_approval",
+      cancel_state: "none",
+      control_locked: false,
+      requires_approval: true,
+    });
+    assert.equal(repeatedAfterHard.status, 200);
+    assert.equal(repeatedAfterHard.payload?.status, "canceled_hard");
+    assert.equal(repeatedAfterHard.payload?.cancel_state, "hard_requested");
+    assert.equal(repeatedAfterHard.payload?.control_locked, true);
   } finally {
     await broker.stop();
     await cleanupTempDir(tempDir);

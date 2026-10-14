@@ -1159,6 +1159,12 @@ async function handleRequest(req, res) {
   const requestUrl = new URL(req.url ?? "/", `http://${req.headers.host || `${host}:${port}`}`);
   const pathname = requestUrl.pathname;
 
+  if (req.method === "GET" && pathname === "/favicon.ico") {
+    res.writeHead(204, { "cache-control": "public, max-age=86400" });
+    res.end();
+    return;
+  }
+
   if (await serveStatic(pathname, res)) {
     return;
   }
@@ -1475,16 +1481,47 @@ async function handleRequest(req, res) {
     const approveMatch = pathname.match(/^\/api\/traces\/([^/]+)\/approve$/);
     if (req.method === "POST" && approveMatch) {
       const traceId = decodeURIComponent(approveMatch[1]);
-      const body = await readBodyJson(req).catch(() => ({}));
-      const response = await fetchBroker(`/execution/${encodeURIComponent(traceId)}/approve`, {
+      let body;
+      try {
+        body = await readBodyJson(req);
+      } catch (error) {
+        if (error && typeof error === "object" && Number.isInteger(error.statusCode)) {
+          return sendGoogleError(
+            res,
+            error.statusCode,
+            error.googleStatus ?? "INVALID_ARGUMENT",
+            error.message ?? "Invalid JSON payload",
+          );
+        }
+        return sendGoogleError(res, 400, "INVALID_ARGUMENT", "Invalid JSON payload");
+      }
+      const actor = requireControlAuth(req, res, body.approved_by ?? "operator");
+      if (!actor) {
+        return;
+      }
+      const requestId = String(body.requestId ?? body.request_id ?? `${Date.now()}-${Math.random()}`);
+      const reason = String(body.reason ?? "").trim();
+      const brokerPath = `/v1/projects/${encodeURIComponent(defaultProject)}/locations/${encodeURIComponent(defaultLocation)}/workflows/${encodeURIComponent(traceId)}:execute`;
+      const response = await fetchBroker(brokerPath, {
         method: "POST",
         headers: {
           "content-type": "application/json",
+          "x-observability-actor": actor,
         },
         body: JSON.stringify({
-          approved_by: body.approved_by ?? "operator",
-          command_context: body.command_context ?? "trace-api-legacy",
+          requestId,
+          actor,
+          reason,
         }),
+      });
+      await appendControlAudit({
+        actor,
+        action: "execute",
+        target: workflowResourceName(defaultProject, defaultLocation, traceId),
+        request_id: requestId,
+        reason: reason || null,
+        upstream_status: response.status,
+        deprecated_route: true,
       });
       return sendJson(
         res,

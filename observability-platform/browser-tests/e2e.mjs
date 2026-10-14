@@ -10,6 +10,10 @@ try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
+  page.on('console', message => {
+    if (message.type() === 'error') errors.push(`console: ${message.text()}`);
+  });
+  page.on('requestfailed', request => errors.push(`request: ${request.url()} ${request.failure()?.errorText || 'failed'}`));
   page.on('dialog', dialog => dialog.accept());
   await page.goto(demo.dashboardUrl);
   await page.locator('#trace-list [data-workflow-id="paper-review"]').waitFor();
@@ -39,6 +43,9 @@ try {
   await page.reload();
   await page.locator('#trace-list [data-workflow-id="paper-review"]').click();
   await page.waitForFunction(() => document.querySelector('#trace-meta').textContent.includes('APPROVED'));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForFunction(() => document.documentElement.scrollWidth <= window.innerWidth);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   assert.deepEqual(errors, []);
   if (process.env.BROWSER_EVIDENCE_PATH) await page.screenshot({ path: process.env.BROWSER_EVIDENCE_PATH, fullPage: true });
   console.log('Browser E2E passed: real dashboard, token authorization, approval/cancel-request, backend state, persisted refresh; no page errors. Synthetic paper fixtures only; no worker consumes the cancellation.');

@@ -25,6 +25,7 @@ test("paper demo serves the real dashboard and isolated approval/cancel lifecycl
     for (const asset of ["/app.js", "/styles.css"]) {
       assert.equal((await fetch(demo.dashboardUrl + asset)).status, 200);
     }
+    assert.equal((await fetch(demo.dashboardUrl + "/favicon.ico")).status, 204);
     const workflows = await request(`${parent}/workflows`);
     assert.equal(workflows.status, 200);
     assert.match(JSON.stringify(workflows.body), /paper-review/);

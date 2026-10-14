@@ -1,0 +1,99 @@
+{
+  "schema": 1,
+  "generated_at": "2026-10-14T19:38:32.363Z",
+  "source_commit": "2ab5ca2da67304d394b2f67a8c3005a80b6eb66b",
+  "source_tree": "22ab12f5f9a5ebc0e4faa1a32660eca2389717fa",
+  "source_blobs": {
+    ".github/workflows/non-agent-tests.yml": "4ca2d0b57b285fec8a03458fe62768637b7841d5",
+    "trading-cli": "f99a584ce2b045463c2c7fbe1b1a211b647fc41b",
+    "observability-platform/paper-demo.mjs": "4e7b180f84da2860816a605828e15066a70b3273",
+    "observability-platform/shared/http-json.mjs": "08b6abb7c32dfe93e8b38a2dbbf5d8ab3ccd1744",
+    "observability-platform/temporal-broker/broker.mjs": "02f06323c3a2012ea9a188cbae862a877e874345",
+    "observability-platform/trace-api/config-response.mjs": "06d8550aa8d7a0130dde9f075700b1633a2ce2b4",
+    "observability-platform/trace-api/local-ops-cache.mjs": "acddf8547dcab3a06c5dc6c5eb3025241d628ca0",
+    "observability-platform/trace-api/server.mjs": "98d2d0696378731234a11ac2fde5db38817d4c78",
+    "observability-platform/dashboard/index.html": "3dc90856bb6be93d0e7c7cf44496c89fec2603e9",
+    "observability-platform/dashboard/app.js": "094c8c1d46ccab7d6682067a814157dc0da1d9b2",
+    "observability-platform/dashboard/styles.css": "bda2f2878426a4e1b6e5d4725350236d9e2eead0",
+    "observability-platform/tests/helpers/process-test-utils.mjs": "49b623fb900fa57abda63c9b9574cda342fd0760",
+    "observability-platform/tests/config-response.test.mjs": "a1c236c997888a5632c7344ca2084d9d44eaf5ea",
+    "observability-platform/tests/dashboard-render.test.mjs": "14bc744f372c08e673ac029ddb9a4e3c81e8e34e",
+    "observability-platform/tests/http-json.test.mjs": "b1b57b5044eecb7568d874c251850484325cd79d",
+    "observability-platform/tests/local-ops-cache.test.mjs": "c4aecb3632efdfc3653f681f1e0c4b151cb994f8",
+    "observability-platform/tests/paper-demo-startup.test.mjs": "6d94d9f3cbfe05b6c121e9a31fb72f767c5ef7e9",
+    "observability-platform/tests/paper-demo.test.mjs": "537aeb145af91b95f3de5c9f109e85dddeff819d",
+    "observability-platform/tests/temporal-broker.api.test.mjs": "670089471026720714f0aaad5795cff86d174923",
+    "observability-platform/tests/trace-api.api.test.mjs": "65d4107e115c7685d1a36d8b0a8b1a0f786b4106",
+    "observability-platform/browser-tests/package.json": "c9ee59e52826de2efe6df8b111c0e4166d0343f8",
+    "observability-platform/browser-tests/package-lock.json": "05fd23cca77a0b7c0823382cf4ac4802fefd97c8",
+    "observability-platform/browser-tests/e2e.mjs": "91ba57ee51b5981caf56efce9f8b60eea50fe183",
+    "observability-platform/browser-tests/capture.mjs": "00fb9bd3ae690a505babe32f688eccd7b81e3fab",
+    "observability-platform/scripts/generate_demo.sh": "b1408004ba7a1fc9a6d2591e92434ddaa2b67aba",
+    "observability-platform/scripts/build-demo-receipt.mjs": "7f93f1ececa4f9fb91f7911bbb74eef388e3f747",
+    "observability-platform/scripts/verify-demo-media.mjs": "dc7dbee1ce07fda9c81a3c073171329ff6ab2b1b"
+  },
+  "artifacts": {
+    "observability-platform/docs/demo/paper-control-plane.gif": {
+      "sha256": "ce4177fa2ad2b44ee3c6d01ab366a52b6b53367317c43db3c6d409ed4fe95c4a",
+      "bytes": 2053076,
+      "codec": "gif",
+      "width": 720,
+      "height": 450,
+      "pixel_format": "bgra",
+      "average_frame_rate": "25/4",
+      "frames": 106,
+      "duration_seconds": 17.67
+    },
+    "observability-platform/docs/demo/paper-control-plane.mp4": {
+      "sha256": "86b54928115f5937e6a61b041f648171c9a05ff3a8209eb12fb0d02367ee00db",
+      "bytes": 580092,
+      "codec": "h264",
+      "width": 1440,
+      "height": 900,
+      "pixel_format": "yuv420p",
+      "average_frame_rate": "24/1",
+      "frames": 422,
+      "duration_seconds": 17.583
+    },
+    "observability-platform/docs/demo/poster.png": {
+      "sha256": "2d2ac4b4325c920f8a2b0c86b73b01cccb479d6876c4f7cc724a1e499091e411",
+      "bytes": 332716,
+      "codec": "png",
+      "width": 1440,
+      "height": 900,
+      "pixel_format": "rgb24",
+      "average_frame_rate": "25/1",
+      "frames": 1,
+      "duration_seconds": null
+    }
+  },
+  "capture": {
+    "viewport": {
+      "width": 1440,
+      "height": 900
+    },
+    "services": [
+      "actual temporal-broker subprocess",
+      "actual trace-api subprocess",
+      "actual dashboard"
+    ],
+    "external_http_requests": 0
+  },
+  "observed_workflow": {
+    "mode": "synthetic-paper-control-plane",
+    "data": "immutable in-process fictional fixture generated for this isolated run",
+    "interactions": [
+      "inspect the synthetic paper fill and its no-exchange-order event",
+      "enter the per-run local control capability",
+      "approve paper-review through the real authenticated control API",
+      "request a soft cancel for paper-cancel without claiming worker completion",
+      "reload and verify approval plus soft-cancel-request persistence"
+    ]
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live order, exchange, market-data, wallet, or real-money action.",
+    "No trading worker runs; soft cancellation remains requested and is not claimed as completed.",
+    "No model or external provider is called.",
+    "No profitability, strategy quality, latency, liquidity, scale, or deployment claim."
+  ]
+}

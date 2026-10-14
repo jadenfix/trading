@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readLimitedJsonBody } from "../shared/http-json.mjs";
@@ -21,14 +21,16 @@ const auditFile = process.env.BROKER_AUDIT_FILE
   ? path.resolve(process.env.BROKER_AUDIT_FILE)
   : path.join(repoRoot, ".trading-cli", "observability", "control-audit.jsonl");
 const maxBodyBytes = Math.max(1024, Number.parseInt(process.env.BROKER_MAX_BODY_BYTES ?? "1048576", 10) || 1048576);
+const bodyTimeoutMs = Math.min(30000, Math.max(100, Number.parseInt(process.env.BROKER_BODY_TIMEOUT_MS ?? "5000", 10) || 5000));
+if (stateFile === auditFile) throw new Error("Broker state and audit files must have distinct paths");
 
 const TERMINAL_STATUSES = new Set(["executed", "completed", "failed", "canceled_soft", "canceled_hard"]);
 
 const state = {
   version: 2,
-  workflows: {},
-  operations: {},
-  request_index: {},
+  workflows: Object.create(null),
+  operations: Object.create(null),
+  request_index: Object.create(null),
 };
 
 function nowIso() {
@@ -160,20 +162,43 @@ async function ensureAuditDir() {
 }
 
 async function loadState() {
+  // ENOENT here is a broken configured directory, not a missing state file.
+  await ensureStateDir();
   try {
-    await ensureStateDir();
     const raw = await readFile(stateFile, "utf8");
     const decoded = JSON.parse(raw);
-    if (decoded && typeof decoded === "object") {
-      state.version = Number.isInteger(decoded.version) ? decoded.version : 2;
-      state.workflows = decoded.workflows && typeof decoded.workflows === "object" ? decoded.workflows : {};
-      state.operations = decoded.operations && typeof decoded.operations === "object" ? decoded.operations : {};
-      state.request_index =
-        decoded.request_index && typeof decoded.request_index === "object" ? decoded.request_index : {};
+    const record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+    if (!record(decoded) || (decoded.version !== undefined && ![1, 2].includes(decoded.version))) {
+      throw new Error("Unsupported broker state format");
     }
-  } catch {
-    // Start with empty state when missing/invalid.
+    for (const key of ["workflows", "operations", "request_index"]) {
+      if (decoded[key] !== undefined && !record(decoded[key])) throw new Error(`Invalid broker state map: ${key}`);
+      for (const entry of Object.values(decoded[key] ?? {})) {
+        if (key === "request_index" ? typeof entry !== "string" : !record(entry)) throw new Error(`Invalid broker state entry: ${key}`);
+      }
+      state[key] = Object.assign(Object.create(null), decoded[key] ?? {});
+    }
+    state.version = decoded.version ?? 2;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw new Error("Refusing to start with unreadable or invalid broker state", { cause: error });
+    try {
+      await lstat(stateFile);
+    } catch (statError) {
+      if (statError.code === "ENOENT") return;
+      throw statError;
+    }
+    throw new Error("Refusing to start with a dangling broker state path");
+    // Only a genuinely missing state file denotes a new broker.
   }
+}
+
+let storageFailure = null;
+function failStorage(error) {
+  storageFailure ??= error;
+  const failure = new Error("Broker storage unavailable; restore storage and restart before retrying controls");
+  failure.statusCode = 503;
+  failure.googleStatus = "UNAVAILABLE";
+  return failure;
 }
 
 let writeInFlight = Promise.resolve();
@@ -181,14 +206,30 @@ function persistState() {
   writeInFlight = writeInFlight
     .catch(() => undefined)
     .then(async () => {
+      if (storageFailure) throw failStorage(storageFailure);
       await ensureStateDir();
-      await writeFile(stateFile, JSON.stringify(state, null, 2), "utf8");
+      const temporary = `${stateFile}.tmp-${process.pid}-${randomUUID()}`;
+      let file;
+      try {
+        file = await open(temporary, "wx", 0o600);
+        await file.writeFile(JSON.stringify(state, null, 2), "utf8");
+        await file.sync();
+        await file.close();
+        file = null;
+        await rename(temporary, stateFile);
+        const directory = await open(path.dirname(stateFile), "r");
+        try { await directory.sync(); } finally { await directory.close(); }
+      } finally {
+        await file?.close();
+        await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; });
+      }
     })
     .catch((error) => {
       console.error(
         `[broker] Failed to persist state to ${stateFile}:`,
         error instanceof Error ? error.message : String(error),
       );
+      throw failStorage(error);
     });
   return writeInFlight;
 }
@@ -198,18 +239,26 @@ function appendAudit(entry) {
   auditInFlight = auditInFlight
     .catch(() => undefined)
     .then(async () => {
+      if (storageFailure) throw failStorage(storageFailure);
       await ensureAuditDir();
-      await appendFile(auditFile, `${JSON.stringify({ ts: nowIso(), ...entry })}\n`, "utf8");
-    });
+      const audit = await open(auditFile, "a", 0o600);
+      try {
+        await audit.writeFile(`${JSON.stringify({ ts: nowIso(), ...entry })}\n`, "utf8");
+        await audit.sync();
+      } finally { await audit.close(); }
+      const directory = await open(path.dirname(auditFile), "r");
+      try { await directory.sync(); } finally { await directory.close(); }
+    }).catch((error) => { throw failStorage(error); });
   return auditInFlight;
 }
 
+const preparedBodies = new WeakMap();
 async function readJsonBody(req) {
-  return readLimitedJsonBody(req, maxBodyBytes);
+  return preparedBodies.has(req) ? preparedBodies.get(req) : readLimitedJsonBody(req, maxBodyBytes);
 }
 
 function getWorkflow(workflowId) {
-  return state.workflows[workflowId] ?? null;
+  return Object.hasOwn(state.workflows, workflowId) ? state.workflows[workflowId] : null;
 }
 
 function upsertWorkflow(payload = {}) {
@@ -219,11 +268,17 @@ function upsertWorkflow(payload = {}) {
 
   const existing = getWorkflow(workflowId);
   const createdAt = existing?.created_at ?? nowIso();
-  const normalizedStatus = payload.status
-    ? normalizeStatus(payload.status)
-    : payload.requires_approval
-      ? "awaiting_approval"
-      : normalizeStatus(existing?.status ?? "running");
+  // Registration is idempotent metadata publication, not a lifecycle transition.
+  // Workers re-register their original payload while polling, so allowing a repeated
+  // `awaiting_approval` value to overwrite an approved/canceled/terminal workflow
+  // would reopen controls and permit duplicate execution.
+  const normalizedStatus = existing
+    ? normalizeStatus(existing.status ?? "running")
+    : payload.status
+      ? normalizeStatus(payload.status)
+      : payload.requires_approval
+        ? "awaiting_approval"
+        : "running";
 
   const merged = {
     workflow_id: workflowId,
@@ -232,17 +287,17 @@ function upsertWorkflow(payload = {}) {
     source_bot: String(payload.source_bot ?? existing?.source_bot ?? "unknown"),
     requires_approval: Boolean(payload.requires_approval ?? existing?.requires_approval ?? false),
     status: normalizedStatus,
-    cancel_state: String(payload.cancel_state ?? existing?.cancel_state ?? "none"),
-    control_locked: Boolean(payload.control_locked ?? existing?.control_locked ?? false),
+    cancel_state: String(existing?.cancel_state ?? payload.cancel_state ?? "none"),
+    control_locked: Boolean(existing?.control_locked ?? payload.control_locked ?? false),
     created_at: createdAt,
     updated_at: nowIso(),
     recommendation: payload.recommendation ?? existing?.recommendation ?? null,
     result: payload.result ?? existing?.result ?? null,
-    approval: payload.approval ?? existing?.approval ?? null,
+    approval: existing?.approval ?? payload.approval ?? null,
     events: Array.isArray(existing?.events) ? existing.events : [],
     input: payload.input ?? existing?.input ?? null,
-    last_command_at: payload.last_command_at ?? existing?.last_command_at ?? null,
-    last_command_by: payload.last_command_by ?? existing?.last_command_by ?? null,
+    last_command_at: existing?.last_command_at ?? payload.last_command_at ?? null,
+    last_command_by: existing?.last_command_by ?? payload.last_command_by ?? null,
   };
 
   state.workflows[workflowId] = merged;
@@ -645,8 +700,9 @@ async function handleControlAction(req, res, project, location, workflowId, acti
     state.request_index[idxKey] = operation.name;
   }
 
-  await Promise.all([
-    appendAudit({
+  // An audit failure must not commit the new control state. The JSONL entry is
+  // an attempt record, not an atomic two-file commit journal.
+  await appendAudit({
       actor,
       action,
       target: targetName,
@@ -654,9 +710,9 @@ async function handleControlAction(req, res, project, location, workflowId, acti
       reason: reason || null,
       outcome: result.ok ? result.outcome : "error",
       status: result.ok ? "OK" : result.status,
-    }),
-    persistState(),
-  ]);
+      phase: "attempt",
+    });
+  await persistState();
 
   return sendJson(res, 200, operation);
 }
@@ -666,6 +722,7 @@ async function handleRequest(req, res) {
   const pathname = requestUrl.pathname;
 
   try {
+    if (storageFailure) throw failStorage(storageFailure);
     if (req.method === "GET" && pathname === "/health") {
       return sendJson(res, 200, {
         ok: true,
@@ -877,7 +934,7 @@ async function handleRequest(req, res) {
       const location = decodeURIComponent(v1WorkflowActionMatch[2]);
       const workflowId = decodeURIComponent(v1WorkflowActionMatch[3]);
       const action = v1WorkflowActionMatch[4];
-      return handleControlAction(req, res, project, location, workflowId, action);
+      return await handleControlAction(req, res, project, location, workflowId, action);
     }
 
     const v1WorkflowGetMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/locations\/([^/]+)\/workflows\/([^/:]+)$/);
@@ -950,8 +1007,37 @@ async function handleRequest(req, res) {
 
 await loadState();
 
-const server = createServer((req, res) => {
-  void handleRequest(req, res);
+// Read bounded POST bodies before the state queue: an incomplete client must
+// not block health or unrelated controls. Only complete requests enter the queue.
+let requestInFlight = Promise.resolve();
+const server = createServer(async (req, res) => {
+  if (req.method === "POST") {
+    let timer;
+    try {
+      const parsed = await Promise.race([
+        readLimitedJsonBody(req, maxBodyBytes),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            const error = new Error("Request body deadline exceeded");
+            error.statusCode = 408;
+            reject(error);
+          }, bodyTimeoutMs);
+        }),
+      ]);
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Request body must be a JSON object");
+      preparedBodies.set(req, parsed);
+    } catch (error) {
+      res.once("finish", () => req.destroy());
+      sendGoogleError(res, error.statusCode ?? 400, "INVALID_ARGUMENT", error instanceof SyntaxError ? "Invalid JSON payload" : error.message);
+      return;
+    } finally { clearTimeout(timer); }
+  }
+  // Readers cannot observe a mutation before its persistence attempt completes.
+  requestInFlight = requestInFlight.catch(() => undefined).then(() => handleRequest(req, res));
+  void requestInFlight.catch(() => {
+    if (!res.headersSent) sendJson(res, 500, { error: "internal_error" });
+    else res.end();
+  });
 });
 
 server.listen(port, host, () => {

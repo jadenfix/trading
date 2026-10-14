@@ -1,14 +1,14 @@
 {
   "schema": 1,
-  "generated_at": "2026-10-13T11:49:51.815Z",
-  "source_commit": "71824fba2a92d613cd5f91db9326ddcef866f7a8",
-  "source_tree": "f867b15e104bbe1881af3cc9dc32c39d471a86e7",
+  "generated_at": "2026-10-14T19:38:32.363Z",
+  "source_commit": "2ab5ca2da67304d394b2f67a8c3005a80b6eb66b",
+  "source_tree": "22ab12f5f9a5ebc0e4faa1a32660eca2389717fa",
   "source_blobs": {
     ".github/workflows/non-agent-tests.yml": "4ca2d0b57b285fec8a03458fe62768637b7841d5",
     "trading-cli": "f99a584ce2b045463c2c7fbe1b1a211b647fc41b",
     "observability-platform/paper-demo.mjs": "4e7b180f84da2860816a605828e15066a70b3273",
     "observability-platform/shared/http-json.mjs": "08b6abb7c32dfe93e8b38a2dbbf5d8ab3ccd1744",
-    "observability-platform/temporal-broker/broker.mjs": "5ffdbf9b9e5b73a681efc2c9a6f6168a63079d1e",
+    "observability-platform/temporal-broker/broker.mjs": "02f06323c3a2012ea9a188cbae862a877e874345",
     "observability-platform/trace-api/config-response.mjs": "06d8550aa8d7a0130dde9f075700b1633a2ce2b4",
     "observability-platform/trace-api/local-ops-cache.mjs": "acddf8547dcab3a06c5dc6c5eb3025241d628ca0",
     "observability-platform/trace-api/server.mjs": "98d2d0696378731234a11ac2fde5db38817d4c78",
@@ -34,30 +34,30 @@
   },
   "artifacts": {
     "observability-platform/docs/demo/paper-control-plane.gif": {
-      "sha256": "08732ffaf6c92672ad2156c2f7e8ce6e5ee1ef65e311a4c91dce4611126e3bbf",
-      "bytes": 750959,
+      "sha256": "ce4177fa2ad2b44ee3c6d01ab366a52b6b53367317c43db3c6d409ed4fe95c4a",
+      "bytes": 2053076,
       "codec": "gif",
       "width": 720,
       "height": 450,
       "pixel_format": "bgra",
-      "average_frame_rate": "100/33",
-      "frames": 51,
-      "duration_seconds": 17
+      "average_frame_rate": "25/4",
+      "frames": 106,
+      "duration_seconds": 17.67
     },
     "observability-platform/docs/demo/paper-control-plane.mp4": {
-      "sha256": "529c9be8056a3f9a1acf2f4344d6f1f2fe09a1af736b10be9960368681d67c5e",
-      "bytes": 488742,
+      "sha256": "86b54928115f5937e6a61b041f648171c9a05ff3a8209eb12fb0d02367ee00db",
+      "bytes": 580092,
       "codec": "h264",
       "width": 1440,
       "height": 900,
       "pixel_format": "yuv420p",
       "average_frame_rate": "24/1",
-      "frames": 404,
-      "duration_seconds": 16.833
+      "frames": 422,
+      "duration_seconds": 17.583
     },
     "observability-platform/docs/demo/poster.png": {
-      "sha256": "822ea77ac64f20882b0122f7a9c7d6d1279daeb3e27ef4e5c004c62c8efd6c37",
-      "bytes": 334989,
+      "sha256": "2d2ac4b4325c920f8a2b0c86b73b01cccb479d6876c4f7cc724a1e499091e411",
+      "bytes": 332716,
       "codec": "png",
       "width": 1440,
       "height": 900,
